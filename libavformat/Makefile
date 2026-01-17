@@ -27,6 +27,7 @@ OBJS = allformats.o         \
        options.o            \
        os_support.o         \
        protocols.o          \
+       myproto.o            \
        riff.o               \
        sdp.o                \
        seek.o               \

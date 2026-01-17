@@ -9,6 +9,8 @@ AVBASENAMES  = ffmpeg ffplay ffprobe
 ALLAVPROGS   = $(AVBASENAMES:%=%$(PROGSSUF)$(EXESUF))
 ALLAVPROGS_G = $(AVBASENAMES:%=%$(PROGSSUF)_g$(EXESUF))
 
+$(ALLAVPROGS) $(ALLAVPROGS_G): $(RUSTPROTO_LIB)
+
 include $(SRC_PATH)/fftools/resources/Makefile
 
 OBJS-ffmpeg +=                  \

@@ -50,6 +50,17 @@ all: all-yes
 include $(SRC_PATH)/tools/Makefile
 include $(SRC_PATH)/ffbuild/common.mak
 
+RUSTPROTO_DIR := $(SRC_PATH)/rustproto
+RUSTPROTO_LIB := $(RUSTPROTO_DIR)/target/release/librsproto.a
+
+$(RUSTPROTO_LIB):
+	cargo build --release --manifest-path $(RUSTPROTO_DIR)/Cargo.toml
+
+EXTRALIBS += -L$(RUSTPROTO_DIR)/target/release -lrsproto
+FFEXTRALIBS += -L$(RUSTPROTO_DIR)/target/release -lrsproto
+
+$(FF_DEP_LIBS): $(RUSTPROTO_LIB)
+
 FF_EXTRALIBS := $(FFEXTRALIBS)
 FF_DEP_LIBS  := $(DEP_LIBS)
 FF_STATIC_DEP_LIBS := $(STATIC_DEP_LIBS)
