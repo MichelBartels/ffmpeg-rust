@@ -59,12 +59,31 @@ fn extract_macos_minos(obj: &Path) -> Option<String> {
 
 fn main() {
     println!("cargo:rerun-if-env-changed=FFMPEG_ROOT");
+    println!("cargo:rerun-if-env-changed=FFMPEG_CONFIGURE_ARGS");
     println!("cargo:rerun-if-changed=rustproto/build.rs");
 
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     let root = env::var("FFMPEG_ROOT").map(PathBuf::from).unwrap_or(manifest_dir);
     let config = root.join("ffbuild").join("config.mak");
     println!("cargo:rerun-if-changed={}", config.display());
+
+    if !config.exists() {
+        let args = env::var("FFMPEG_CONFIGURE_ARGS").unwrap_or_else(|_| {
+            "--disable-debug --disable-doc".to_string()
+        });
+        let mut cmd = Command::new("./configure");
+        cmd.current_dir(&root);
+        for tok in args.split_whitespace() {
+            cmd.arg(tok);
+        }
+        let status = cmd.status().expect("failed to run ffmpeg configure");
+        if !status.success() {
+            panic!(
+                "ffmpeg configure failed. Set FFMPEG_CONFIGURE_ARGS or pre-configure the tree at {}",
+                root.display()
+            );
+        }
+    }
 
     let status = Command::new("make")
         .arg("-C")

@@ -222,12 +222,79 @@ extern "C" {
     ) -> c_int;
 }
 
+/// Handle for an in-process ffmpeg/ffprobe run.
+///
+/// Dropping this handle will block until the underlying run completes so the
+/// source and temp directory stay valid for the duration of the run.
+pub struct RunHandle {
+    tempdir: Option<tempfile::TempDir>,
+    join: Option<std::thread::JoinHandle<Result<(), String>>>,
+    _source: SourceHandle,
+}
+
+impl RunHandle {
+    pub fn path(&self) -> &Path {
+        self.tempdir
+            .as_ref()
+            .expect("RunHandle tempdir missing")
+            .path()
+    }
+
+    pub fn wait(mut self) -> Result<tempfile::TempDir, String> {
+        if let Some(join) = self.join.take() {
+            match join.join() {
+                Ok(res) => res?,
+                Err(_) => return Err("ffmpeg_run thread panicked".to_string()),
+            }
+        }
+        self.tempdir
+            .take()
+            .ok_or_else(|| "ffmpeg_run tempdir already taken".to_string())
+    }
+}
+
+impl Drop for RunHandle {
+    fn drop(&mut self) {
+        if let Some(join) = self.join.take() {
+            let _ = join.join();
+        }
+    }
+}
+
+fn prepare_run<S: Source + 'static>(
+    source: S,
+    args: &[String],
+) -> Result<(tempfile::TempDir, SourceHandle, Vec<String>), String> {
+    let dir = tempfile::TempDir::new().map_err(|e| e.to_string())?;
+    let handle = register_source(Arc::new(source));
+    let url = handle.url();
+
+    let mut replaced = Vec::with_capacity(args.len());
+    let mut saw_input = false;
+    let outdir = dir.path().to_string_lossy().to_string();
+    for arg in args {
+        if arg.contains("{input}") {
+            saw_input = true;
+        }
+        let mut arg = arg.replace("{input}", &url);
+        arg = arg.replace("{outdir}", &outdir);
+        replaced.push(arg);
+    }
+
+    if !saw_input {
+        return Err("args must include {input} placeholder".to_string());
+    }
+
+    Ok((dir, handle, replaced))
+}
+
 /// Run ffmpeg in-process with a temporary output directory.
 ///
 /// The `args` must include `{input}` which will be replaced with a
 /// `myproto://<id>` URL pointing to `source`. You can also use `{outdir}` in
 /// any argument to substitute the temp directory path returned by this
-/// function.
+/// function. Use `RunHandle::path()` to access the output directory before
+/// the run completes, and `RunHandle::wait()` to wait for completion.
 ///
 /// For HLS fMP4, `-hls_fmp4_init_filename` expects a basename (e.g. `init.mp4`)
 /// rather than an absolute path; combine it with `-hls_segment_filename
@@ -235,46 +302,35 @@ extern "C" {
 pub fn run_ffmpeg<S: Source + 'static>(
     source: S,
     args: &[String],
-) -> Result<tempfile::TempDir, String> {
-    let dir = tempfile::TempDir::new().map_err(|e| e.to_string())?;
-    let handle = register_source(Arc::new(source));
-    let url = handle.url();
-
-    let mut replaced = Vec::with_capacity(args.len());
-    let mut saw_input = false;
-    let outdir = dir.path().to_string_lossy().to_string();
-    for arg in args {
-        if arg.contains("{input}") {
-            saw_input = true;
+) -> Result<RunHandle, String> {
+    let (dir, handle, replaced) = prepare_run(source, args)?;
+    let join = std::thread::spawn(move || {
+        let mut cstrings: Vec<CString> = Vec::with_capacity(replaced.len());
+        for arg in &replaced {
+            cstrings.push(
+                CString::new(arg.as_bytes())
+                    .map_err(|_| format!("arg contains null byte: {}", arg))?,
+            );
         }
-        let mut arg = arg.replace("{input}", &url);
-        arg = arg.replace("{outdir}", &outdir);
-        replaced.push(arg);
-    }
 
-    if !saw_input {
-        return Err("args must include {input} placeholder".to_string());
-    }
+        let mut argv: Vec<*mut c_char> = cstrings
+            .iter()
+            .map(|s| s.as_ptr() as *mut c_char)
+            .collect();
 
-    let mut cstrings: Vec<CString> = Vec::with_capacity(replaced.len());
-    for arg in &replaced {
-        cstrings.push(
-            CString::new(arg.as_bytes())
-                .map_err(|_| format!("arg contains null byte: {}", arg))?,
-        );
-    }
+        let ret = unsafe { ffmpeg_run_with_options(argv.len() as c_int, argv.as_mut_ptr(), 0, 0) };
+        if ret == 0 {
+            Ok(())
+        } else {
+            Err(format!("ffmpeg_run failed: {}", ret))
+        }
+    });
 
-    let mut argv: Vec<*mut c_char> = cstrings
-        .iter()
-        .map(|s| s.as_ptr() as *mut c_char)
-        .collect();
-
-    let ret = unsafe { ffmpeg_run_with_options(argv.len() as c_int, argv.as_mut_ptr(), 0, 0) };
-    if ret == 0 {
-        Ok(dir)
-    } else {
-        Err(format!("ffmpeg_run failed: {}", ret))
-    }
+    Ok(RunHandle {
+        tempdir: Some(dir),
+        join: Some(join),
+        _source: handle,
+    })
 }
 
 /// Run ffprobe in-process with a temporary output directory.
@@ -282,48 +338,38 @@ pub fn run_ffmpeg<S: Source + 'static>(
 /// The `args` must include `{input}` which will be replaced with a
 /// `myproto://<id>` URL pointing to `source`. You can also use `{outdir}` in
 /// any argument to substitute the temp directory path returned by this
-/// function.
+/// function. Use `RunHandle::path()` to access the output directory before
+/// the run completes, and `RunHandle::wait()` to wait for completion.
 pub fn run_ffprobe<S: Source + 'static>(
     source: S,
     args: &[String],
-) -> Result<tempfile::TempDir, String> {
-    let dir = tempfile::TempDir::new().map_err(|e| e.to_string())?;
-    let handle = register_source(Arc::new(source));
-    let url = handle.url();
-
-    let mut replaced = Vec::with_capacity(args.len());
-    let mut saw_input = false;
-    let outdir = dir.path().to_string_lossy().to_string();
-    for arg in args {
-        if arg.contains("{input}") {
-            saw_input = true;
+) -> Result<RunHandle, String> {
+    let (dir, handle, replaced) = prepare_run(source, args)?;
+    let join = std::thread::spawn(move || {
+        let mut cstrings: Vec<CString> = Vec::with_capacity(replaced.len());
+        for arg in &replaced {
+            cstrings.push(
+                CString::new(arg.as_bytes())
+                    .map_err(|_| format!("arg contains null byte: {}", arg))?,
+            );
         }
-        let mut arg = arg.replace("{input}", &url);
-        arg = arg.replace("{outdir}", &outdir);
-        replaced.push(arg);
-    }
 
-    if !saw_input {
-        return Err("args must include {input} placeholder".to_string());
-    }
+        let mut argv: Vec<*mut c_char> = cstrings
+            .iter()
+            .map(|s| s.as_ptr() as *mut c_char)
+            .collect();
 
-    let mut cstrings: Vec<CString> = Vec::with_capacity(replaced.len());
-    for arg in &replaced {
-        cstrings.push(
-            CString::new(arg.as_bytes())
-                .map_err(|_| format!("arg contains null byte: {}", arg))?,
-        );
-    }
+        let ret = unsafe { ffprobe_run_with_options(argv.len() as c_int, argv.as_mut_ptr(), 0, 0) };
+        if ret == 0 {
+            Ok(())
+        } else {
+            Err(format!("ffprobe_run failed: {}", ret))
+        }
+    });
 
-    let mut argv: Vec<*mut c_char> = cstrings
-        .iter()
-        .map(|s| s.as_ptr() as *mut c_char)
-        .collect();
-
-    let ret = unsafe { ffprobe_run_with_options(argv.len() as c_int, argv.as_mut_ptr(), 0, 0) };
-    if ret == 0 {
-        Ok(dir)
-    } else {
-        Err(format!("ffprobe_run failed: {}", ret))
-    }
+    Ok(RunHandle {
+        tempdir: Some(dir),
+        join: Some(join),
+        _source: handle,
+    })
 }

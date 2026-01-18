@@ -57,8 +57,10 @@ fn concurrent_parity() {
 
     let r1 = t1.join().expect("thread 1 join");
     let r2 = t2.join().expect("thread 2 join");
-    let direct_dir = r1.expect("direct run failed");
-    let proto_dir = r2.expect("proto run failed");
+    let direct_handle = r1.expect("direct run failed");
+    let proto_handle = r2.expect("proto run failed");
+    let direct_dir = direct_handle.wait().expect("direct wait failed");
+    let proto_dir = proto_handle.wait().expect("proto wait failed");
 
     let mut direct_files = Vec::new();
     let mut proto_files = Vec::new();

@@ -23,6 +23,10 @@ path = "rustproto/tests/concurrent_parity.rs"
 name = "concurrent_ffprobe"
 path = "rustproto/tests/concurrent_ffprobe.rs"
 
+[[test]]
+name = "concurrent_parity_dash"
+path = "rustproto/tests/concurrent_parity_dash.rs"
+
 [profile.release]
 codegen-units = 1
 lto = false

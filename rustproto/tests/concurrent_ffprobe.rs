@@ -76,8 +76,10 @@ fn concurrent_ffprobe() {
 
     let r1 = t1.join().expect("thread 1 join");
     let r2 = t2.join().expect("thread 2 join");
-    let dir1 = r1.expect("ffprobe run 1 failed");
-    let dir2 = r2.expect("ffprobe run 2 failed");
+    let handle1 = r1.expect("ffprobe run 1 failed");
+    let handle2 = r2.expect("ffprobe run 2 failed");
+    let dir1 = handle1.wait().expect("ffprobe wait 1 failed");
+    let dir2 = handle2.wait().expect("ffprobe wait 2 failed");
 
     let mut files1 = Vec::new();
     let mut files2 = Vec::new();
