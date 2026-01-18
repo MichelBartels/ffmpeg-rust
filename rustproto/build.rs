@@ -59,10 +59,10 @@ fn extract_macos_minos(obj: &Path) -> Option<String> {
 
 fn main() {
     println!("cargo:rerun-if-env-changed=FFMPEG_ROOT");
-    println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed=rustproto/build.rs");
 
-    let root = env::var("FFMPEG_ROOT").unwrap_or_else(|_| "..".to_string());
-    let root = PathBuf::from(root);
+    let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
+    let root = env::var("FFMPEG_ROOT").map(PathBuf::from).unwrap_or(manifest_dir);
     let config = root.join("ffbuild").join("config.mak");
     println!("cargo:rerun-if-changed={}", config.display());
 
