@@ -85,14 +85,27 @@ fn main() {
         }
     }
 
-    let status = Command::new("make")
-        .arg("-C")
-        .arg(&root)
-        .arg("fftools/libffmpeg_runner.a")
-        .status()
-        .expect("failed to run make for ffmpeg runner");
+    let lib_targets = [
+        "libavutil/libavutil.a",
+        "libavcodec/libavcodec.a",
+        "libavformat/libavformat.a",
+        "libavfilter/libavfilter.a",
+        "libavdevice/libavdevice.a",
+        "libswscale/libswscale.a",
+        "libswresample/libswresample.a",
+        "libpostproc/libpostproc.a",
+    ];
+
+    let mut make = Command::new("make");
+    make.arg("-C").arg(&root);
+    for target in &lib_targets {
+        make.arg(target);
+    }
+    make.arg("fftools/libffmpeg_runner.a");
+
+    let status = make.status().expect("failed to run make for ffmpeg artifacts");
     if !status.success() {
-        panic!("ffmpeg runner build failed");
+        panic!("ffmpeg build failed");
     }
 
     let runner_dir = root.join("fftools");
