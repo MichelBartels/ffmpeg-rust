@@ -11,27 +11,22 @@ const AVSEEK_SIZE: i32 = 0x10000;
 const FALLBACK_PATH: &str =
     "/Users/michelbartels/Documents/personal-projects/backend-torrent/ffmpeg/Big_Buck_Bunny.mp4";
 
-pub trait Source: Send {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize>;
-    fn seek(&mut self, pos: i64, whence: i32) -> std::io::Result<i64>;
-    fn size(&mut self) -> std::io::Result<i64>;
+pub trait Source: Send + Sync {
+    fn open(&self) -> std::io::Result<Box<dyn ReadSeek>>;
+    fn size(&self) -> std::io::Result<i64>;
     fn is_streamed(&self) -> bool {
         false
     }
 }
 
-pub trait SourceFactory: Send + Sync {
-    fn open(&self) -> std::io::Result<Box<dyn Source>>;
-    fn is_streamed(&self) -> bool {
-        false
-    }
-}
+pub trait ReadSeek: Read + Seek + Send {}
+impl<T: Read + Seek + Send> ReadSeek for T {}
 
-pub struct FileSourceFactory {
+pub struct FileSource {
     path: String,
 }
 
-impl FileSourceFactory {
+impl FileSource {
     pub fn new<P: AsRef<Path>>(path: P) -> Self {
         Self {
             path: path.as_ref().to_string_lossy().to_string(),
@@ -39,56 +34,30 @@ impl FileSourceFactory {
     }
 }
 
-impl SourceFactory for FileSourceFactory {
-    fn open(&self) -> std::io::Result<Box<dyn Source>> {
-        let file = File::open(&self.path)?;
-        let size = file.metadata()?.len() as i64;
-        Ok(Box::new(FileSource { file, size }))
-    }
-}
-
-struct FileSource {
-    file: File,
-    size: i64,
-}
-
 impl Source for FileSource {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        self.file.read(buf)
+    fn open(&self) -> std::io::Result<Box<dyn ReadSeek>> {
+        let file = File::open(&self.path)?;
+        Ok(Box::new(file))
     }
 
-    fn seek(&mut self, pos: i64, whence: i32) -> std::io::Result<i64> {
-        let new_pos = match whence {
-            0 => pos,
-            1 => self.file.stream_position()? as i64 + pos,
-            2 => self.size + pos,
-            _ => return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "bad whence")),
-        };
-        if new_pos < 0 {
-            return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "negative seek"));
-        }
-        self.file.seek(SeekFrom::Start(new_pos as u64))?;
-        Ok(new_pos)
-    }
-
-    fn size(&mut self) -> std::io::Result<i64> {
-        Ok(self.size)
+    fn size(&self) -> std::io::Result<i64> {
+        Ok(std::fs::metadata(&self.path)?.len() as i64)
     }
 }
 
 struct Registry {
     next_id: u64,
-    factories: HashMap<u64, Arc<dyn SourceFactory>>,
+    sources: HashMap<u64, Arc<dyn Source>>,
 }
 
 static REGISTRY: Lazy<Mutex<Registry>> = Lazy::new(|| {
     Mutex::new(Registry {
         next_id: 1,
-        factories: HashMap::new(),
+        sources: HashMap::new(),
     })
 });
 
-pub struct SourceHandle {
+struct SourceHandle {
     id: u64,
 }
 
@@ -101,15 +70,15 @@ impl SourceHandle {
 impl Drop for SourceHandle {
     fn drop(&mut self) {
         let mut reg = REGISTRY.lock().unwrap();
-        reg.factories.remove(&self.id);
+        reg.sources.remove(&self.id);
     }
 }
 
-pub fn register_source(factory: Arc<dyn SourceFactory>) -> SourceHandle {
+fn register_source(source: Arc<dyn Source>) -> SourceHandle {
     let mut reg = REGISTRY.lock().unwrap();
     let id = reg.next_id;
     reg.next_id += 1;
-    reg.factories.insert(id, factory);
+    reg.sources.insert(id, source);
     SourceHandle { id }
 }
 
@@ -124,7 +93,8 @@ fn parse_id(uri: &CStr) -> Option<u64> {
 }
 
 struct RsProtoCtx {
-    source: Box<dyn Source>,
+    handle: Box<dyn ReadSeek>,
+    size: i64,
 }
 
 #[no_mangle]
@@ -138,30 +108,25 @@ pub extern "C" fn rsproto_open(
     }
 
     let uri = unsafe { CStr::from_ptr(uri) };
-    let mut source = None;
+    let mut source: Option<(Box<dyn ReadSeek>, Option<i64>)> = None;
     let mut streamed = false;
 
     if let Some(id) = parse_id(uri) {
-        if let Some(factory) = REGISTRY.lock().unwrap().factories.get(&id).cloned() {
-            match factory.open() {
+        if let Some(source_entry) = REGISTRY.lock().unwrap().sources.get(&id).cloned() {
+            match source_entry.open() {
                 Ok(s) => {
-                    streamed = factory.is_streamed();
-                    source = Some(s);
+                    streamed = source_entry.is_streamed();
+                    source = Some((s, source_entry.size().ok()));
                 }
-                Err(_) => {
-                    return std::ptr::null_mut();
-                }
+                Err(_) => return std::ptr::null_mut(),
             }
         }
     }
 
     if source.is_none() {
-        let factory = FileSourceFactory::new(FALLBACK_PATH);
-        match factory.open() {
-            Ok(s) => {
-                streamed = factory.is_streamed();
-                source = Some(s);
-            }
+        let fallback = FileSource::new(FALLBACK_PATH);
+        match fallback.open() {
+            Ok(s) => source = Some((s, fallback.size().ok())),
             Err(_) => return std::ptr::null_mut(),
         }
     }
@@ -170,8 +135,10 @@ pub extern "C" fn rsproto_open(
         unsafe { *is_streamed = if streamed { 1 } else { 0 } };
     }
 
+    let (handle, size) = source.unwrap();
     let ctx = RsProtoCtx {
-        source: source.unwrap(),
+        handle,
+        size: size.unwrap_or(-1),
     };
     Box::into_raw(Box::new(ctx)) as *mut c_void
 }
@@ -185,7 +152,7 @@ pub extern "C" fn rsproto_read(ctx: *mut c_void, buf: *mut c_uchar, size: c_int)
     let ctx = unsafe { &mut *(ctx as *mut RsProtoCtx) };
     let slice = unsafe { std::slice::from_raw_parts_mut(buf, size as usize) };
 
-    match ctx.source.read(slice) {
+    match ctx.handle.read(slice) {
         Ok(0) => 0,
         Ok(n) => n as c_int,
         Err(_) => -1,
@@ -201,10 +168,24 @@ pub extern "C" fn rsproto_seek(ctx: *mut c_void, pos: c_longlong, whence: c_int)
     let ctx = unsafe { &mut *(ctx as *mut RsProtoCtx) };
 
     if whence == AVSEEK_SIZE {
-        return ctx.source.size().unwrap_or(-1) as c_longlong;
+        return ctx.size as c_longlong;
     }
 
-    match ctx.source.seek(pos as i64, whence) {
+    let new_pos = match whence {
+        0 => pos as i64,
+        1 => match ctx.handle.stream_position() {
+            Ok(cur) => cur as i64 + pos as i64,
+            Err(_) => return -1,
+        },
+        2 => ctx.size + pos as i64,
+        _ => return -1,
+    };
+
+    if new_pos < 0 {
+        return -1;
+    }
+
+    match ctx.handle.seek(SeekFrom::Start(new_pos as u64)) {
         Ok(v) => v as c_longlong,
         Err(_) => -1,
     }
@@ -235,9 +216,42 @@ extern "C" {
     ) -> c_int;
 }
 
-pub fn run_ffmpeg(args: &[String]) -> Result<(), String> {
-    let mut cstrings: Vec<CString> = Vec::with_capacity(args.len());
+/// Run ffmpeg in-process with a temporary output directory.
+///
+/// The `args` must include `{input}` which will be replaced with a
+/// `myproto://<id>` URL pointing to `source`. You can also use `{outdir}` in
+/// any argument to substitute the temp directory path returned by this
+/// function.
+///
+/// For HLS fMP4, `-hls_fmp4_init_filename` expects a basename (e.g. `init.mp4`)
+/// rather than an absolute path; combine it with `-hls_segment_filename
+/// {outdir}/seg_%05d.m4s` so the init segment lands in the temp directory.
+pub fn run_ffmpeg<S: Source + 'static>(
+    source: S,
+    args: &[String],
+) -> Result<tempfile::TempDir, String> {
+    let dir = tempfile::TempDir::new().map_err(|e| e.to_string())?;
+    let handle = register_source(Arc::new(source));
+    let url = handle.url();
+
+    let mut replaced = Vec::with_capacity(args.len());
+    let mut saw_input = false;
+    let outdir = dir.path().to_string_lossy().to_string();
     for arg in args {
+        if arg.contains("{input}") {
+            saw_input = true;
+        }
+        let mut arg = arg.replace("{input}", &url);
+        arg = arg.replace("{outdir}", &outdir);
+        replaced.push(arg);
+    }
+
+    if !saw_input {
+        return Err("args must include {input} placeholder".to_string());
+    }
+
+    let mut cstrings: Vec<CString> = Vec::with_capacity(replaced.len());
+    for arg in &replaced {
         cstrings.push(
             CString::new(arg.as_bytes())
                 .map_err(|_| format!("arg contains null byte: {}", arg))?,
@@ -251,18 +265,8 @@ pub fn run_ffmpeg(args: &[String]) -> Result<(), String> {
 
     let ret = unsafe { ffmpeg_run_with_options(argv.len() as c_int, argv.as_mut_ptr(), 0, 0) };
     if ret == 0 {
-        Ok(())
+        Ok(dir)
     } else {
         Err(format!("ffmpeg_run failed: {}", ret))
     }
-}
-
-pub fn run_ffmpeg_with_tempdir<F>(build_args: F) -> Result<tempfile::TempDir, String>
-where
-    F: FnOnce(&Path) -> Vec<String>,
-{
-    let dir = tempfile::TempDir::new().map_err(|e| e.to_string())?;
-    let args = build_args(dir.path());
-    run_ffmpeg(&args)?;
-    Ok(dir)
 }
