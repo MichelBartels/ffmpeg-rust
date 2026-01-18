@@ -70,6 +70,15 @@ OBJS-ffmpeg_concurrent_parity += \
 fftools/ffmpeg_nomain.o: fftools/ffmpeg.c
 	$(COMPILE_C) -DFFMPEG_NO_MAIN
 
+FFMPEG_RUNNER_OBJS := \
+    $(filter-out fftools/ffmpeg_concurrent_parity.o,$(OBJS-ffmpeg_concurrent_parity)) \
+    fftools/cmdutils.o \
+    fftools/opt_common.o \
+    fftools/ffmpeg_run_api.o
+
+fftools/libffmpeg_runner.a: $(FFMPEG_RUNNER_OBJS)
+	$(AR) $(ARFLAGS) $@ $^
+
 define DOFFTOOL
 OBJS-$(1) += fftools/cmdutils.o fftools/opt_common.o fftools/$(1).o $(OBJS-$(1)-yes)
 ifdef HAVE_GNU_WINDRES
@@ -115,4 +124,4 @@ uninstall-progs:
 	$(RM) $(addprefix "$(BINDIR)/", $(ALLAVPROGS))
 
 clean::
-	$(RM) $(ALLAVPROGS) $(ALLAVPROGS_G) $(TESTPROGS) $(CLEANSUFFIXES:%=fftools/%) $(CLEANSUFFIXES:%=fftools/graph/%) $(CLEANSUFFIXES:%=fftools/textformat/%)
+	$(RM) $(ALLAVPROGS) $(ALLAVPROGS_G) $(TESTPROGS) fftools/libffmpeg_runner.a $(CLEANSUFFIXES:%=fftools/%) $(CLEANSUFFIXES:%=fftools/graph/%) $(CLEANSUFFIXES:%=fftools/textformat/%)

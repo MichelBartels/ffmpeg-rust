@@ -160,6 +160,8 @@ endif
 %$(PROGSSUF)_g$(EXESUF): $(FF_DEP_LIBS)
 	$(call LINK,$(LDFLAGS) $(LDEXEFLAGS) $(LD_O) $(OBJS-$*) $(FF_EXTRALIBS))
 
+libffmpeg_runner.a: fftools/libffmpeg_runner.a
+
 VERSION_SH  = $(SRC_PATH)/ffbuild/version.sh
 ifeq ($(VERSION_TRACKING),yes)
 GIT_LOG     = $(SRC_PATH)/.git/logs/HEAD
