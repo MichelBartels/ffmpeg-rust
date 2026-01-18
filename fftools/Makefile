@@ -70,8 +70,12 @@ OBJS-ffmpeg_concurrent_parity += \
 fftools/ffmpeg_nomain.o: fftools/ffmpeg.c
 	$(COMPILE_C) -DFFMPEG_NO_MAIN
 
+fftools/ffprobe_nomain.o: fftools/ffprobe.c
+	$(COMPILE_C) -DFFPROBE_NO_MAIN
+
 FFMPEG_RUNNER_OBJS := \
     $(filter-out fftools/ffmpeg_concurrent_parity.o,$(OBJS-ffmpeg_concurrent_parity)) \
+    fftools/ffprobe_nomain.o \
     fftools/cmdutils.o \
     fftools/opt_common.o \
     fftools/ffmpeg_run_api.o

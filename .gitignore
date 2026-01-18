@@ -35,6 +35,7 @@
 /.config
 /.version
 /ffmpeg
+/ffmpeg_concurrent_parity
 /ffplay
 /ffprobe
 .DS_Store

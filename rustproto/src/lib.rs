@@ -214,6 +214,12 @@ extern "C" {
         install_signal_handlers: c_int,
         stdin_interaction: c_int,
     ) -> c_int;
+    fn ffprobe_run_with_options(
+        argc: c_int,
+        argv: *mut *mut c_char,
+        install_signal_handlers: c_int,
+        stdin_interaction: c_int,
+    ) -> c_int;
 }
 
 /// Run ffmpeg in-process with a temporary output directory.
@@ -268,5 +274,56 @@ pub fn run_ffmpeg<S: Source + 'static>(
         Ok(dir)
     } else {
         Err(format!("ffmpeg_run failed: {}", ret))
+    }
+}
+
+/// Run ffprobe in-process with a temporary output directory.
+///
+/// The `args` must include `{input}` which will be replaced with a
+/// `myproto://<id>` URL pointing to `source`. You can also use `{outdir}` in
+/// any argument to substitute the temp directory path returned by this
+/// function.
+pub fn run_ffprobe<S: Source + 'static>(
+    source: S,
+    args: &[String],
+) -> Result<tempfile::TempDir, String> {
+    let dir = tempfile::TempDir::new().map_err(|e| e.to_string())?;
+    let handle = register_source(Arc::new(source));
+    let url = handle.url();
+
+    let mut replaced = Vec::with_capacity(args.len());
+    let mut saw_input = false;
+    let outdir = dir.path().to_string_lossy().to_string();
+    for arg in args {
+        if arg.contains("{input}") {
+            saw_input = true;
+        }
+        let mut arg = arg.replace("{input}", &url);
+        arg = arg.replace("{outdir}", &outdir);
+        replaced.push(arg);
+    }
+
+    if !saw_input {
+        return Err("args must include {input} placeholder".to_string());
+    }
+
+    let mut cstrings: Vec<CString> = Vec::with_capacity(replaced.len());
+    for arg in &replaced {
+        cstrings.push(
+            CString::new(arg.as_bytes())
+                .map_err(|_| format!("arg contains null byte: {}", arg))?,
+        );
+    }
+
+    let mut argv: Vec<*mut c_char> = cstrings
+        .iter()
+        .map(|s| s.as_ptr() as *mut c_char)
+        .collect();
+
+    let ret = unsafe { ffprobe_run_with_options(argv.len() as c_int, argv.as_mut_ptr(), 0, 0) };
+    if ret == 0 {
+        Ok(dir)
+    } else {
+        Err(format!("ffprobe_run failed: {}", ret))
     }
 }
