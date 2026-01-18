@@ -37,6 +37,7 @@
 /ffmpeg
 /ffplay
 /ffprobe
+.DS_Store
 /config.asm
 /config.h
 /config_components.asm

@@ -89,46 +89,24 @@
 const char program_name[] = "ffmpeg";
 const int program_birth_year = 2000;
 
-FILE *vstats_file;
-
-typedef struct BenchmarkTimeStamps {
-    int64_t real_usec;
-    int64_t user_usec;
-    int64_t sys_usec;
-} BenchmarkTimeStamps;
 
 static BenchmarkTimeStamps get_benchmark_time_stamps(void);
 static int64_t getmaxrss(void);
 
-atomic_uint nb_output_dumped = 0;
+static FftoolsContext *signal_ctx;
 
-static BenchmarkTimeStamps current_time;
-AVIOContext *progress_avio = NULL;
-
-InputFile   **input_files   = NULL;
-int        nb_input_files   = 0;
-
-OutputFile   **output_files   = NULL;
-int         nb_output_files   = 0;
-
-FilterGraph **filtergraphs;
-int        nb_filtergraphs;
-
-Decoder     **decoders;
-int        nb_decoders;
 
 #if HAVE_TERMIOS_H
 
 /* init terminal so that we can grab keys */
-static struct termios oldtty;
-static int restore_tty;
 #endif
 
 static void term_exit_sigsafe(void)
 {
 #if HAVE_TERMIOS_H
-    if(restore_tty)
-        tcsetattr (0, TCSANOW, &oldtty);
+    FftoolsContext *ctx = signal_ctx ? signal_ctx : fftools_ctx;
+    if(ctx->restore_tty)
+        tcsetattr(0, TCSANOW, &ctx->oldtty);
 #endif
 }
 
@@ -138,9 +116,6 @@ void term_exit(void)
     term_exit_sigsafe();
 }
 
-static volatile int received_sigterm = 0;
-static volatile int received_nb_signals = 0;
-static atomic_int transcode_init_done = 0;
 static volatile int ffmpeg_exited = 0;
 static int64_t copy_ts_first_pts = AV_NOPTS_VALUE;
 
@@ -148,10 +123,11 @@ static void
 sigterm_handler(int sig)
 {
     int ret;
-    received_sigterm = sig;
-    received_nb_signals++;
+    FftoolsContext *ctx = signal_ctx ? signal_ctx : fftools_ctx;
+    ctx->received_sigterm = sig;
+    ctx->received_nb_signals++;
     term_exit_sigsafe();
-    if(received_nb_signals > 3) {
+    if(ctx->received_nb_signals > 3) {
         ret = write(2/*STDERR_FILENO*/, "Received > 3 system signals, hard exiting\n",
                     strlen("Received > 3 system signals, hard exiting\n"));
         if (ret < 0) { /* Do nothing */ };
@@ -216,11 +192,11 @@ void term_init(void)
 #endif
 
 #if HAVE_TERMIOS_H
-    if (stdin_interaction) {
+    if (fftools_ctx->stdin_interaction) {
         struct termios tty;
         if (tcgetattr (0, &tty) == 0) {
-            oldtty = tty;
-            restore_tty = 1;
+            fftools_ctx->oldtty = tty;
+            fftools_ctx->restore_tty = 1;
 
             tty.c_iflag &= ~(IGNBRK|BRKINT|PARMRK|ISTRIP
                              |INLCR|IGNCR|ICRNL|IXON);
@@ -233,21 +209,24 @@ void term_init(void)
 
             tcsetattr (0, TCSANOW, &tty);
         }
-        SIGNAL(SIGQUIT, sigterm_handler); /* Quit (POSIX).  */
+        if (fftools_ctx->install_signal_handlers)
+            SIGNAL(SIGQUIT, sigterm_handler); /* Quit (POSIX).  */
     }
 #endif
 
-    SIGNAL(SIGINT , sigterm_handler); /* Interrupt (ANSI).    */
-    SIGNAL(SIGTERM, sigterm_handler); /* Termination (ANSI).  */
+    if (fftools_ctx->install_signal_handlers) {
+        SIGNAL(SIGINT , sigterm_handler); /* Interrupt (ANSI).    */
+        SIGNAL(SIGTERM, sigterm_handler); /* Termination (ANSI).  */
 #ifdef SIGXCPU
-    SIGNAL(SIGXCPU, sigterm_handler);
+        SIGNAL(SIGXCPU, sigterm_handler);
 #endif
 #ifdef SIGPIPE
-    signal(SIGPIPE, SIG_IGN); /* Broken pipe (POSIX). */
+        signal(SIGPIPE, SIG_IGN); /* Broken pipe (POSIX). */
 #endif
 #if HAVE_SETCONSOLECTRLHANDLER
-    SetConsoleCtrlHandler((PHANDLER_ROUTINE) CtrlHandler, TRUE);
+        SetConsoleCtrlHandler((PHANDLER_ROUTINE) CtrlHandler, TRUE);
 #endif
+    }
 }
 
 /* read a key without blocking */
@@ -305,62 +284,62 @@ static int read_key(void)
 
 static int decode_interrupt_cb(void *ctx)
 {
-    return received_nb_signals > atomic_load(&transcode_init_done);
+    return fftools_ctx->received_nb_signals > atomic_load(&fftools_ctx->transcode_init_done);
 }
 
 const AVIOInterruptCB int_cb = { decode_interrupt_cb, NULL };
 
 static void ffmpeg_cleanup(int ret)
 {
-    if ((print_graphs || print_graphs_file) && nb_output_files > 0)
-        print_filtergraphs(filtergraphs, nb_filtergraphs, input_files, nb_input_files, output_files, nb_output_files);
+    if ((fftools_ctx->print_graphs || fftools_ctx->print_graphs_file) && fftools_ctx->nb_output_files > 0)
+        print_filtergraphs(fftools_ctx->filtergraphs, fftools_ctx->nb_filtergraphs, fftools_ctx->input_files, fftools_ctx->nb_input_files, fftools_ctx->output_files, fftools_ctx->nb_output_files);
 
-    if (do_benchmark) {
+    if (fftools_ctx->do_benchmark) {
         int64_t maxrss = getmaxrss() / 1024;
         av_log(NULL, AV_LOG_INFO, "bench: maxrss=%"PRId64"KiB\n", maxrss);
     }
 
-    for (int i = 0; i < nb_filtergraphs; i++)
-        fg_free(&filtergraphs[i]);
-    av_freep(&filtergraphs);
+    for (int i = 0; i < fftools_ctx->nb_filtergraphs; i++)
+        fg_free(&fftools_ctx->filtergraphs[i]);
+    av_freep(&fftools_ctx->filtergraphs);
 
-    for (int i = 0; i < nb_output_files; i++)
-        of_free(&output_files[i]);
+    for (int i = 0; i < fftools_ctx->nb_output_files; i++)
+        of_free(&fftools_ctx->output_files[i]);
 
-    for (int i = 0; i < nb_input_files; i++)
-        ifile_close(&input_files[i]);
+    for (int i = 0; i < fftools_ctx->nb_input_files; i++)
+        ifile_close(&fftools_ctx->input_files[i]);
 
-    for (int i = 0; i < nb_decoders; i++)
-        dec_free(&decoders[i]);
-    av_freep(&decoders);
+    for (int i = 0; i < fftools_ctx->nb_decoders; i++)
+        dec_free(&fftools_ctx->decoders[i]);
+    av_freep(&fftools_ctx->decoders);
 
-    if (vstats_file) {
-        if (fclose(vstats_file))
+    if (fftools_ctx->vstats_file) {
+        if (fclose(fftools_ctx->vstats_file))
             av_log(NULL, AV_LOG_ERROR,
                    "Error closing vstats file, loss of information possible: %s\n",
                    av_err2str(AVERROR(errno)));
     }
-    av_freep(&vstats_filename);
+    av_freep(&fftools_ctx->vstats_filename);
     of_enc_stats_close();
 
     hw_device_free_all();
 
-    av_freep(&filter_nbthreads);
+    av_freep(&fftools_ctx->filter_nbthreads);
 
-    av_freep(&print_graphs_file);
-    av_freep(&print_graphs_format);
+    av_freep(&fftools_ctx->print_graphs_file);
+    av_freep(&fftools_ctx->print_graphs_format);
 
-    av_freep(&input_files);
-    av_freep(&output_files);
+    av_freep(&fftools_ctx->input_files);
+    av_freep(&fftools_ctx->output_files);
 
     uninit_opts();
 
     avformat_network_deinit();
 
-    if (received_sigterm) {
+    if (fftools_ctx->received_sigterm) {
         av_log(NULL, AV_LOG_INFO, "Exiting normally, received signal %d.\n",
-               (int) received_sigterm);
-    } else if (ret && atomic_load(&transcode_init_done)) {
+               (int) fftools_ctx->received_sigterm);
+    } else if (ret && atomic_load(&fftools_ctx->transcode_init_done)) {
         av_log(NULL, AV_LOG_INFO, "Conversion failed!\n");
     }
     term_exit();
@@ -372,8 +351,8 @@ OutputStream *ost_iter(OutputStream *prev)
     int of_idx  = prev ? prev->file->index : 0;
     int ost_idx = prev ? prev->index + 1  : 0;
 
-    for (; of_idx < nb_output_files; of_idx++) {
-        OutputFile *of = output_files[of_idx];
+    for (; of_idx < fftools_ctx->nb_output_files; of_idx++) {
+        OutputFile *of = fftools_ctx->output_files[of_idx];
         if (ost_idx < of->nb_streams)
             return of->streams[ost_idx];
 
@@ -388,8 +367,8 @@ InputStream *ist_iter(InputStream *prev)
     int if_idx  = prev ? prev->file->index : 0;
     int ist_idx = prev ? prev->index + 1  : 0;
 
-    for (; if_idx < nb_input_files; if_idx++) {
-        InputFile *f = input_files[if_idx];
+    for (; if_idx < fftools_ctx->nb_input_files; if_idx++) {
+        InputFile *f = fftools_ctx->input_files[if_idx];
         if (ist_idx < f->nb_streams)
             return f->streams[ist_idx];
 
@@ -549,7 +528,7 @@ int check_avoptions_used(const AVDictionary *opts, const AVDictionary *opts_used
 
 void update_benchmark(const char *fmt, ...)
 {
-    if (do_benchmark_all) {
+    if (fftools_ctx->do_benchmark_all) {
         BenchmarkTimeStamps t = get_benchmark_time_stamps();
         va_list va;
         char buf[1024];
@@ -560,18 +539,18 @@ void update_benchmark(const char *fmt, ...)
             va_end(va);
             av_log(NULL, AV_LOG_INFO,
                    "bench: %8" PRIu64 " user %8" PRIu64 " sys %8" PRIu64 " real %s \n",
-                   t.user_usec - current_time.user_usec,
-                   t.sys_usec - current_time.sys_usec,
-                   t.real_usec - current_time.real_usec, buf);
+                   t.user_usec - fftools_ctx->current_time.user_usec,
+                   t.sys_usec - fftools_ctx->current_time.sys_usec,
+                   t.real_usec - fftools_ctx->current_time.real_usec, buf);
         }
-        current_time = t;
+        fftools_ctx->current_time = t;
     }
 }
 
 static void print_report(int is_last_report, int64_t timer_start, int64_t cur_time, int64_t pts)
 {
     AVBPrint buf, buf_script;
-    int64_t total_size = of_filesize(output_files[0]);
+    int64_t total_size = of_filesize(fftools_ctx->output_files[0]);
     int vid;
     double bitrate;
     double speed;
@@ -584,15 +563,15 @@ static void print_report(int is_last_report, int64_t timer_start, int64_t cur_ti
     int ret;
     float t;
 
-    if (!print_stats && !is_last_report && !progress_avio)
+    if (!fftools_ctx->print_stats && !is_last_report && !fftools_ctx->progress_avio)
         return;
 
     if (!is_last_report) {
         if (last_time == -1) {
             last_time = cur_time;
         }
-        if (((cur_time - last_time) < stats_period && !first_report) ||
-            (first_report && atomic_load(&nb_output_dumped) < nb_output_files))
+        if (((cur_time - last_time) < fftools_ctx->stats_period && !first_report) ||
+            (first_report && atomic_load(&fftools_ctx->nb_output_dumped) < fftools_ctx->nb_output_files))
             return;
         last_time = cur_time;
     }
@@ -634,7 +613,7 @@ static void print_report(int is_last_report, int64_t timer_start, int64_t cur_ti
         }
     }
 
-    if (copy_ts) {
+    if (fftools_ctx->copy_ts) {
         if (copy_ts_first_pts == AV_NOPTS_VALUE && pts > 1)
             copy_ts_first_pts = pts;
         if (copy_ts_first_pts != AV_NOPTS_VALUE)
@@ -702,9 +681,9 @@ static void print_report(int is_last_report, int64_t timer_start, int64_t cur_ti
 
     av_bprintf(&buf, " elapsed=%"PRId64":%02d:%02d.%02d", hours, mins, secs, ms / 10);
 
-    if (print_stats || is_last_report) {
+    if (fftools_ctx->print_stats || is_last_report) {
         const char end = is_last_report ? '\n' : '\r';
-        if (print_stats==1 && AV_LOG_INFO > av_log_get_level()) {
+        if (fftools_ctx->print_stats==1 && AV_LOG_INFO > av_log_get_level()) {
             fprintf(stderr, "%s    %c", buf.str, end);
         } else
             av_log(NULL, AV_LOG_INFO, "%s    %c", buf.str, end);
@@ -713,15 +692,15 @@ static void print_report(int is_last_report, int64_t timer_start, int64_t cur_ti
     }
     av_bprint_finalize(&buf, NULL);
 
-    if (progress_avio) {
+    if (fftools_ctx->progress_avio) {
         av_bprintf(&buf_script, "progress=%s\n",
                    is_last_report ? "end" : "continue");
-        avio_write(progress_avio, buf_script.str,
+        avio_write(fftools_ctx->progress_avio, buf_script.str,
                    FFMIN(buf_script.len, buf_script.size - 1));
-        avio_flush(progress_avio);
+        avio_flush(fftools_ctx->progress_avio);
         av_bprint_finalize(&buf_script, NULL);
         if (is_last_report) {
-            if ((ret = avio_closep(&progress_avio)) < 0)
+            if ((ret = avio_closep(&fftools_ctx->progress_avio)) < 0)
                 av_log(NULL, AV_LOG_ERROR,
                        "Error closing progress log, loss of information possible: %s\n", av_err2str(ret));
         }
@@ -739,7 +718,7 @@ static void print_stream_maps(void)
                 av_log(NULL, AV_LOG_INFO, "  Stream #%d:%d (%s) -> %s",
                        ist->file->index, ist->index, ist->dec ? ist->dec->name : "?",
                        ist->filters[j]->name);
-                if (nb_filtergraphs > 1)
+                if (fftools_ctx->nb_filtergraphs > 1)
                     av_log(NULL, AV_LOG_INFO, " (graph %d)", ist->filters[j]->graph->index);
                 av_log(NULL, AV_LOG_INFO, "\n");
             }
@@ -757,7 +736,7 @@ static void print_stream_maps(void)
         if (ost->filter && !filtergraph_is_simple(ost->filter->graph)) {
             /* output from a complex graph */
             av_log(NULL, AV_LOG_INFO, "  %s", ost->filter->name);
-            if (nb_filtergraphs > 1)
+            if (fftools_ctx->nb_filtergraphs > 1)
                 av_log(NULL, AV_LOG_INFO, " (graph %d)", ost->filter->graph->index);
 
             av_log(NULL, AV_LOG_INFO, " -> Stream #%d:%d (%s)\n", ost->file->index,
@@ -856,8 +835,8 @@ static int check_keyboard_interaction(int64_t cur_time)
                     fg_send_command(ost->fg_simple, time, target, command, arg,
                                     key == 'C');
             }
-            for (i = 0; i < nb_filtergraphs; i++)
-                fg_send_command(filtergraphs[i], time, target, command, arg,
+            for (i = 0; i < fftools_ctx->nb_filtergraphs; i++)
+                fg_send_command(fftools_ctx->filtergraphs[i], time, target, command, arg,
                                 key == 'C');
         } else {
             av_log(NULL, AV_LOG_ERROR,
@@ -890,26 +869,26 @@ static int transcode(Scheduler *sch)
 
     print_stream_maps();
 
-    atomic_store(&transcode_init_done, 1);
+    atomic_store(&fftools_ctx->transcode_init_done, 1);
 
     ret = sch_start(sch);
     if (ret < 0)
         return ret;
 
-    if (stdin_interaction) {
+    if (fftools_ctx->stdin_interaction) {
         av_log(NULL, AV_LOG_INFO, "Press [q] to stop, [?] for help\n");
     }
 
     timer_start = av_gettime_relative();
 
-    while (!sch_wait(sch, stats_period, &transcode_ts)) {
+    while (!sch_wait(sch, fftools_ctx->stats_period, &transcode_ts)) {
         int64_t cur_time= av_gettime_relative();
 
-        if (received_nb_signals)
+        if (fftools_ctx->received_nb_signals)
             break;
 
         /* if 'q' pressed, exits */
-        if (stdin_interaction)
+        if (fftools_ctx->stdin_interaction)
             if (check_keyboard_interaction(cur_time) < 0)
                 break;
 
@@ -920,8 +899,8 @@ static int transcode(Scheduler *sch)
     ret = sch_stop(sch, &transcode_ts);
 
     /* write the trailer if needed */
-    for (int i = 0; i < nb_output_files; i++) {
-        int err = of_write_trailer(output_files[i]);
+    for (int i = 0; i < fftools_ctx->nb_output_files; i++) {
+        int err = of_write_trailer(fftools_ctx->output_files[i]);
         ret = err_merge(ret, err);
     }
 
@@ -977,7 +956,7 @@ static int64_t getmaxrss(void)
 #endif
 }
 
-int main(int argc, char **argv)
+static int ffmpeg_main_internal(int argc, char **argv)
 {
     Scheduler *sch = NULL;
 
@@ -1009,14 +988,14 @@ int main(int argc, char **argv)
     if (ret < 0)
         goto finish;
 
-    if (nb_output_files <= 0 && nb_input_files == 0) {
+    if (fftools_ctx->nb_output_files <= 0 && fftools_ctx->nb_input_files == 0) {
         show_usage();
         av_log(NULL, AV_LOG_WARNING, "Use -h to get full help or, even better, run 'man %s'\n", program_name);
         ret = 1;
         goto finish;
     }
 
-    if (nb_output_files <= 0) {
+    if (fftools_ctx->nb_output_files <= 0) {
         av_log(NULL, AV_LOG_FATAL, "At least one output file must be specified\n");
         ret = 1;
         goto finish;
@@ -1026,20 +1005,20 @@ int main(int argc, char **argv)
     android_binder_threadpool_init_if_required();
 #endif
 
-    current_time = ti = get_benchmark_time_stamps();
+    fftools_ctx->current_time = ti = get_benchmark_time_stamps();
     ret = transcode(sch);
-    if (ret >= 0 && do_benchmark) {
+    if (ret >= 0 && fftools_ctx->do_benchmark) {
         int64_t utime, stime, rtime;
-        current_time = get_benchmark_time_stamps();
-        utime = current_time.user_usec - ti.user_usec;
-        stime = current_time.sys_usec  - ti.sys_usec;
-        rtime = current_time.real_usec - ti.real_usec;
+        fftools_ctx->current_time = get_benchmark_time_stamps();
+        utime = fftools_ctx->current_time.user_usec - ti.user_usec;
+        stime = fftools_ctx->current_time.sys_usec  - ti.sys_usec;
+        rtime = fftools_ctx->current_time.real_usec - ti.real_usec;
         av_log(NULL, AV_LOG_INFO,
                "bench: utime=%0.3fs stime=%0.3fs rtime=%0.3fs\n",
                utime / 1000000.0, stime / 1000000.0, rtime / 1000000.0);
     }
 
-    ret = received_nb_signals                 ? 255 :
+    ret = fftools_ctx->received_nb_signals                 ? 255 :
           (ret == FFMPEG_ERROR_RATE_EXCEEDED) ?  69 : ret;
 
 finish:
@@ -1055,3 +1034,35 @@ finish:
 
     return ret;
 }
+
+int ffmpeg_run(FftoolsContext *ctx, int argc, char **argv)
+{
+    FftoolsContext *prev = fftools_set_context(ctx);
+    if (!fftools_ctx->install_signal_handlers)
+        signal_ctx = NULL;
+    else
+        signal_ctx = fftools_ctx;
+
+    /* reset run-scoped state */
+    fftools_ctx->received_sigterm = 0;
+    fftools_ctx->received_nb_signals = 0;
+    atomic_store(&fftools_ctx->transcode_init_done, 0);
+    atomic_store(&fftools_ctx->nb_output_dumped, 0);
+    fftools_ctx->current_time.real_usec = 0;
+    fftools_ctx->current_time.user_usec = 0;
+    fftools_ctx->current_time.sys_usec = 0;
+    fftools_ctx->progress_avio = NULL;
+    fftools_ctx->vstats_file = NULL;
+
+    int ret = ffmpeg_main_internal(argc, argv);
+    signal_ctx = NULL;
+    fftools_set_context(prev);
+    return ret;
+}
+
+#ifndef FFMPEG_NO_MAIN
+int main(int argc, char **argv)
+{
+    return ffmpeg_run(fftools_default_context(), argc, argv);
+}
+#endif

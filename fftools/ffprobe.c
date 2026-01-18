@@ -2432,12 +2432,12 @@ static int open_input_file(InputFile *ifile, const char *filename,
     err = set_decoders(fmt_ctx);
     if (err < 0)
         return err;
-    if (!av_dict_get(format_opts, "scan_all_pmts", NULL, AV_DICT_MATCH_CASE)) {
-        av_dict_set(&format_opts, "scan_all_pmts", "1", AV_DICT_DONT_OVERWRITE);
+    if (!av_dict_get(fftools_ctx->format_opts, "scan_all_pmts", NULL, AV_DICT_MATCH_CASE)) {
+        av_dict_set(&fftools_ctx->format_opts, "scan_all_pmts", "1", AV_DICT_DONT_OVERWRITE);
         scan_all_pmts_set = 1;
     }
     if ((err = avformat_open_input(&fmt_ctx, filename,
-                                   iformat, &format_opts)) < 0) {
+                                   iformat, &fftools_ctx->format_opts)) < 0) {
         print_error(filename, err);
         return err;
     }
@@ -2447,15 +2447,15 @@ static int open_input_file(InputFile *ifile, const char *filename,
     }
     ifile->fmt_ctx = fmt_ctx;
     if (scan_all_pmts_set)
-        av_dict_set(&format_opts, "scan_all_pmts", NULL, AV_DICT_MATCH_CASE);
-    while ((t = av_dict_iterate(format_opts, t)))
+        av_dict_set(&fftools_ctx->format_opts, "scan_all_pmts", NULL, AV_DICT_MATCH_CASE);
+    while ((t = av_dict_iterate(fftools_ctx->format_opts, t)))
         av_log(NULL, AV_LOG_WARNING, "Option %s skipped - not known to demuxer.\n", t->key);
 
     if (find_stream_info) {
         AVDictionary **opts;
         int orig_nb_streams = fmt_ctx->nb_streams;
 
-        err = setup_find_stream_info_opts(fmt_ctx, codec_opts, &opts);
+        err = setup_find_stream_info_opts(fmt_ctx, fftools_ctx->codec_opts, &opts);
         if (err < 0)
             return err;
 
@@ -2493,7 +2493,7 @@ static int open_input_file(InputFile *ifile, const char *filename,
         {
             AVDictionary *opts;
 
-            err = filter_codec_opts(codec_opts, stream->codecpar->codec_id,
+            err = filter_codec_opts(fftools_ctx->codec_opts, stream->codecpar->codec_id,
                                     fmt_ctx, stream, codec, &opts, NULL);
             if (err < 0)
                 exit(1);
@@ -2510,7 +2510,7 @@ static int open_input_file(InputFile *ifile, const char *filename,
                 // For logging it is needed to disable at least frame threads as otherwise
                 // the log information would need to be reordered and matches up to contexts and frames
                 // That is in fact possible but not trivial
-                av_dict_set(&codec_opts, "threads", "1", 0);
+                av_dict_set(&fftools_ctx->codec_opts, "threads", "1", 0);
             }
 
             av_dict_set(&opts, "flags", "+copy_opaque", AV_DICT_MULTIKEY);

@@ -68,8 +68,6 @@ enum show_muxdemuxers {
     SHOW_MUXERS,
 };
 
-static FILE *report_file;
-static int report_file_level = AV_LOG_DEBUG;
 
 int show_license(void *optctx, const char *opt, const char *arg)
 {
@@ -145,7 +143,6 @@ int show_license(void *optctx, const char *opt, const char *arg)
     return 0;
 }
 
-static int warned_cfg = 0;
 
 #define INDENT        1
 #define SHOW_VERSION  2
@@ -169,11 +166,11 @@ static int warned_cfg = 0;
         if (flags & SHOW_CONFIG) {                                      \
             const char *cfg = libname##_configuration();                \
             if (strcmp(FFMPEG_CONFIGURATION, cfg)) {                    \
-                if (!warned_cfg) {                                      \
+                if (!fftools_ctx->warned_cfg) {                                      \
                     av_log(NULL, level,                                 \
                             "%sWARNING: library configuration mismatch\n", \
                             indent);                                    \
-                    warned_cfg = 1;                                     \
+                    fftools_ctx->warned_cfg = 1;                                     \
                 }                                                       \
                 av_log(NULL, level, "%s%-11s configuration: %s\n",      \
                         indent, #libname, cfg);                         \
@@ -235,7 +232,7 @@ static void print_buildconf(int flags, int level)
 void show_banner(int argc, char **argv, const OptionDef *options)
 {
     int idx = locate_option(argc, argv, options, "version");
-    if (hide_banner || idx)
+    if (fftools_ctx->hide_banner || idx)
         return;
 
     print_program_info (INDENT|SHOW_COPYRIGHT, AV_LOG_INFO);
@@ -706,7 +703,7 @@ int show_codecs(void *optctx, const char *opt, const char *arg)
 
         printf(" %-20s %s", desc->name, desc->long_name ? desc->long_name : "");
 
-        /* print decoders/encoders when there's more than one or their
+        /* print fftools_ctx->decoders/encoders when there's more than one or their
          * names are different from codec name */
         while ((codec = next_codec_for_id(desc->id, &iter, 0))) {
             if (strcmp(codec->name, desc->name)) {
@@ -1139,9 +1136,9 @@ static void log_callback_report(void *ptr, int level, const char *fmt, va_list v
     av_log_default_callback(ptr, level, fmt, vl);
     av_log_format_line(ptr, level, fmt, vl2, line, sizeof(line), &print_prefix);
     va_end(vl2);
-    if (report_file_level >= level) {
-        fputs(line, report_file);
-        fflush(report_file);
+    if (fftools_ctx->report_file_level >= level) {
+        fputs(line, fftools_ctx->report_file);
+        fflush(fftools_ctx->report_file);
     }
 }
 
@@ -1155,7 +1152,7 @@ int init_report(const char *env, FILE **file)
     struct tm *tm;
     AVBPrint filename;
 
-    if (report_file) /* already opened */
+    if (fftools_ctx->report_file) /* already opened */
         return 0;
     time(&now);
     tm = localtime(&now);
@@ -1177,7 +1174,7 @@ int init_report(const char *env, FILE **file)
             val = NULL;
         } else if (!strcmp(key, "level")) {
             char *tail;
-            report_file_level = strtol(val, &tail, 10);
+            fftools_ctx->report_file_level = strtol(val, &tail, 10);
             if (*tail) {
                 av_log(NULL, AV_LOG_FATAL, "Invalid report file level\n");
                 av_free(key);
@@ -1204,10 +1201,10 @@ int init_report(const char *env, FILE **file)
 
     prog_loglevel = av_log_get_level();
     if (!envlevel)
-        report_file_level = FFMAX(report_file_level, prog_loglevel);
+        fftools_ctx->report_file_level = FFMAX(fftools_ctx->report_file_level, prog_loglevel);
 
-    report_file = fopen_utf8(filename.str, "w");
-    if (!report_file) {
+    fftools_ctx->report_file = fopen_utf8(filename.str, "w");
+    if (!fftools_ctx->report_file) {
         int ret = AVERROR(errno);
         av_log(NULL, AV_LOG_ERROR, "Failed to open report \"%s\": %s\n",
                filename.str, strerror(errno));
@@ -1221,11 +1218,11 @@ int init_report(const char *env, FILE **file)
            program_name,
            tm->tm_year + 1900, tm->tm_mon + 1, tm->tm_mday,
            tm->tm_hour, tm->tm_min, tm->tm_sec,
-           filename.str, report_file_level);
+           filename.str, fftools_ctx->report_file_level);
     av_bprint_finalize(&filename, NULL);
 
     if (file)
-        *file = report_file;
+        *file = fftools_ctx->report_file;
 
     return 0;
 }

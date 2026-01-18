@@ -5,6 +5,10 @@ AVPROGS-$(CONFIG_FFPROBE)  += ffprobe
 AVPROGS     := $(AVPROGS-yes:%=%$(PROGSSUF)$(EXESUF))
 PROGS       += $(AVPROGS)
 
+TESTPROGS-$(CONFIG_FFMPEG) += ffmpeg_concurrent_parity
+TESTPROGS   := $(TESTPROGS-yes:%=%$(PROGSSUF)$(EXESUF))
+PROGS       += $(TESTPROGS)
+
 AVBASENAMES  = ffmpeg ffplay ffprobe
 ALLAVPROGS   = $(AVBASENAMES:%=%$(PROGSSUF)$(EXESUF))
 ALLAVPROGS_G = $(AVBASENAMES:%=%$(PROGSSUF)_g$(EXESUF))
@@ -14,6 +18,7 @@ $(ALLAVPROGS) $(ALLAVPROGS_G): $(RUSTPROTO_LIB)
 include $(SRC_PATH)/fftools/resources/Makefile
 
 OBJS-ffmpeg +=                  \
+    fftools/fftools_context.o   \
     fftools/ffmpeg_dec.o        \
     fftools/ffmpeg_demux.o      \
     fftools/ffmpeg_enc.o        \
@@ -41,6 +46,7 @@ OBJS-ffmpeg +=                  \
     $(RESOBJS)                        \
 
 OBJS-ffprobe +=                       \
+    fftools/fftools_context.o         \
     fftools/textformat/avtextformat.o \
     fftools/textformat/tf_compact.o   \
     fftools/textformat/tf_default.o   \
@@ -54,7 +60,15 @@ OBJS-ffprobe +=                       \
     fftools/textformat/tw_stdout.o    \
 
 OBJS-ffmpeg += $(COMPAT_OBJS:%=compat/%)
-OBJS-ffplay += fftools/ffplay_renderer.o
+OBJS-ffplay += fftools/fftools_context.o fftools/ffplay_renderer.o
+
+OBJS-ffmpeg_concurrent_parity += \
+    fftools/ffmpeg_concurrent_parity.o \
+    fftools/ffmpeg_nomain.o \
+    $(filter-out fftools/ffmpeg.o,$(OBJS-ffmpeg))
+
+fftools/ffmpeg_nomain.o: fftools/ffmpeg.c
+	$(COMPILE_C) -DFFMPEG_NO_MAIN
 
 define DOFFTOOL
 OBJS-$(1) += fftools/cmdutils.o fftools/opt_common.o fftools/$(1).o $(OBJS-$(1)-yes)
@@ -70,6 +84,11 @@ $(1)$(PROGSSUF)_g$(EXESUF): FF_EXTRALIBS += $(EXTRALIBS-$(1))
 endef
 
 $(foreach P,$(AVPROGS-yes),$(eval $(call DOFFTOOL,$(P))))
+
+ffmpeg_concurrent_parity$(PROGSSUF)_g$(EXESUF): $(OBJS-ffmpeg_concurrent_parity)
+$(OBJS-ffmpeg_concurrent_parity): | fftools fftools/textformat fftools/resources fftools/graph
+ffmpeg_concurrent_parity$(PROGSSUF)_g$(EXESUF): FF_EXTRALIBS += $(EXTRALIBS-ffmpeg)
+-include $(OBJS-ffmpeg_concurrent_parity:.o=.d)
 
 all: $(AVPROGS)
 
@@ -96,4 +115,4 @@ uninstall-progs:
 	$(RM) $(addprefix "$(BINDIR)/", $(ALLAVPROGS))
 
 clean::
-	$(RM) $(ALLAVPROGS) $(ALLAVPROGS_G) $(CLEANSUFFIXES:%=fftools/%) $(CLEANSUFFIXES:%=fftools/graph/%) $(CLEANSUFFIXES:%=fftools/textformat/%)
+	$(RM) $(ALLAVPROGS) $(ALLAVPROGS_G) $(TESTPROGS) $(CLEANSUFFIXES:%=fftools/%) $(CLEANSUFFIXES:%=fftools/graph/%) $(CLEANSUFFIXES:%=fftools/textformat/%)

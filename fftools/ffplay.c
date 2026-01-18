@@ -1885,7 +1885,7 @@ static int configure_video_filters(AVFilterGraph *graph, VideoState *is, const c
         }
     }
 
-    while ((e = av_dict_iterate(sws_dict, e))) {
+    while ((e = av_dict_iterate(fftools_ctx->sws_dict, e))) {
         if (!strcmp(e->key, "sws_flags")) {
             av_strlcatf(sws_flags_str, sizeof(sws_flags_str), "%s=%s:", "flags", e->value);
         } else
@@ -2028,7 +2028,7 @@ static int configure_audio_filters(VideoState *is, const char *afilters, int for
 
     av_bprint_init(&bp, 0, AV_BPRINT_SIZE_AUTOMATIC);
 
-    while ((e = av_dict_iterate(swr_opts, e)))
+    while ((e = av_dict_iterate(fftools_ctx->swr_opts, e)))
         av_strlcatf(aresample_swr_opts, sizeof(aresample_swr_opts), "%s=%s:", e->key, e->value);
     if (strlen(aresample_swr_opts))
         aresample_swr_opts[strlen(aresample_swr_opts)-1] = '\0';
@@ -2698,7 +2698,7 @@ static int stream_component_open(VideoState *is, int stream_index)
     if (fast)
         avctx->flags2 |= AV_CODEC_FLAG2_FAST;
 
-    ret = filter_codec_opts(codec_opts, avctx->codec_id, ic,
+    ret = filter_codec_opts(fftools_ctx->codec_opts, avctx->codec_id, ic,
                             ic->streams[stream_index], codec, &opts, NULL);
     if (ret < 0)
         goto fail;
@@ -2873,21 +2873,21 @@ static int read_thread(void *arg)
     }
     ic->interrupt_callback.callback = decode_interrupt_cb;
     ic->interrupt_callback.opaque = is;
-    if (!av_dict_get(format_opts, "scan_all_pmts", NULL, AV_DICT_MATCH_CASE)) {
-        av_dict_set(&format_opts, "scan_all_pmts", "1", AV_DICT_DONT_OVERWRITE);
+    if (!av_dict_get(fftools_ctx->format_opts, "scan_all_pmts", NULL, AV_DICT_MATCH_CASE)) {
+        av_dict_set(&fftools_ctx->format_opts, "scan_all_pmts", "1", AV_DICT_DONT_OVERWRITE);
         scan_all_pmts_set = 1;
     }
-    err = avformat_open_input(&ic, is->filename, is->iformat, &format_opts);
+    err = avformat_open_input(&ic, is->filename, is->iformat, &fftools_ctx->format_opts);
     if (err < 0) {
         print_error(is->filename, err);
         ret = -1;
         goto fail;
     }
     if (scan_all_pmts_set)
-        av_dict_set(&format_opts, "scan_all_pmts", NULL, AV_DICT_MATCH_CASE);
-    remove_avoptions(&format_opts, codec_opts);
+        av_dict_set(&fftools_ctx->format_opts, "scan_all_pmts", NULL, AV_DICT_MATCH_CASE);
+    remove_avoptions(&fftools_ctx->format_opts, fftools_ctx->codec_opts);
 
-    ret = check_avoptions(format_opts);
+    ret = check_avoptions(fftools_ctx->format_opts);
     if (ret < 0)
         goto fail;
     is->ic = ic;
@@ -2899,7 +2899,7 @@ static int read_thread(void *arg)
         AVDictionary **opts;
         int orig_nb_streams = ic->nb_streams;
 
-        err = setup_find_stream_info_opts(ic, codec_opts, &opts);
+        err = setup_find_stream_info_opts(ic, fftools_ctx->codec_opts, &opts);
         if (err < 0) {
             av_log(NULL, AV_LOG_ERROR,
                    "Error setting up avformat_find_stream_info() options\n");

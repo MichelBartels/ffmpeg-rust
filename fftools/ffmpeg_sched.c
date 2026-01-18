@@ -26,6 +26,7 @@
 #include "cmdutils.h"
 #include "ffmpeg_sched.h"
 #include "ffmpeg_utils.h"
+#include "fftools_context.h"
 #include "sync_queue.h"
 #include "thread_queue.h"
 
@@ -272,6 +273,7 @@ enum SchedulerState {
 
 struct Scheduler {
     const AVClass      *class;
+    FftoolsContext     *ctx;
 
     SchDemux           *demux;
     unsigned         nb_demux;
@@ -603,6 +605,7 @@ Scheduler *sch_alloc(void)
 
     sch->class    = &scheduler_class;
     sch->sdp_auto = 1;
+    sch->ctx      = fftools_ctx;
 
     ret = pthread_mutex_init(&sch->schedule_lock, NULL);
     if (ret)
@@ -2664,6 +2667,8 @@ static void *task_wrapper(void *arg)
     Scheduler *sch = task->parent;
     int ret;
     int err = 0;
+
+    fftools_set_context(sch->ctx);
 
     ret = task->func(task->func_arg);
     if (ret < 0)

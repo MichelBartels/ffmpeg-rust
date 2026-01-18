@@ -30,6 +30,8 @@
 #include "libavformat/avformat.h"
 #include "libswscale/swscale.h"
 
+#include "fftools/fftools_context.h"
+
 #ifdef _WIN32
 #undef main /* We don't want SDL to override our main() */
 #endif
@@ -43,11 +45,6 @@ extern const char program_name[];
  * program birth year, defined by the program for show_banner()
  */
 extern const int program_birth_year;
-
-extern AVDictionary *sws_dict;
-extern AVDictionary *swr_opts;
-extern AVDictionary *format_opts, *codec_opts;
-extern int hide_banner;
 
 /**
  * Initialize dynamic library loading

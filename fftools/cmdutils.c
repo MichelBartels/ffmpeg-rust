@@ -53,18 +53,12 @@
 #include "compat/w32dlfcn.h"
 #endif
 
-AVDictionary *sws_dict;
-AVDictionary *swr_opts;
-AVDictionary *format_opts, *codec_opts;
-
-int hide_banner = 0;
-
 void uninit_opts(void)
 {
-    av_dict_free(&swr_opts);
-    av_dict_free(&sws_dict);
-    av_dict_free(&format_opts);
-    av_dict_free(&codec_opts);
+    av_dict_free(&fftools_ctx->swr_opts);
+    av_dict_free(&fftools_ctx->sws_dict);
+    av_dict_free(&fftools_ctx->format_opts);
+    av_dict_free(&fftools_ctx->codec_opts);
 }
 
 void log_callback_help(void *ptr, int level, const char *fmt, va_list vl)
@@ -583,7 +577,7 @@ void parse_loglevel(int argc, char **argv, const OptionDef *options)
     freeenv_utf8(env);
     idx = locate_option(argc, argv, options, "hide_banner");
     if (idx)
-        hide_banner = 1;
+        fftools_ctx->hide_banner = 1;
 }
 
 static const AVOption *opt_find(void *obj, const char *name, const char *unit,
@@ -621,12 +615,12 @@ int opt_default(void *optctx, const char *opt, const char *arg)
                          AV_OPT_SEARCH_CHILDREN | AV_OPT_SEARCH_FAKE_OBJ)) ||
         ((opt[0] == 'v' || opt[0] == 'a' || opt[0] == 's') &&
          (o = opt_find(&cc, opt + 1, NULL, 0, AV_OPT_SEARCH_FAKE_OBJ)))) {
-        av_dict_set(&codec_opts, opt, arg, FLAGS);
+        av_dict_set(&fftools_ctx->codec_opts, opt, arg, FLAGS);
         consumed = 1;
     }
     if ((o = opt_find(&fc, opt, NULL, 0,
                          AV_OPT_SEARCH_CHILDREN | AV_OPT_SEARCH_FAKE_OBJ))) {
-        av_dict_set(&format_opts, opt, arg, FLAGS);
+        av_dict_set(&fftools_ctx->format_opts, opt, arg, FLAGS);
         if (consumed)
             av_log(NULL, AV_LOG_VERBOSE, "Routing option %s to both codec and muxer layer\n", opt);
         consumed = 1;
@@ -640,7 +634,7 @@ int opt_default(void *optctx, const char *opt, const char *arg)
             av_log(NULL, AV_LOG_ERROR, "Directly using swscale dimensions/format options is not supported, please use the -s or -pix_fmt options\n");
             return AVERROR(EINVAL);
         }
-        av_dict_set(&sws_dict, opt, arg, FLAGS);
+        av_dict_set(&fftools_ctx->sws_dict, opt, arg, FLAGS);
 
         consumed = 1;
     }
@@ -653,7 +647,7 @@ int opt_default(void *optctx, const char *opt, const char *arg)
 #if CONFIG_SWRESAMPLE
     if (!consumed && (o=opt_find(&swr_class, opt, NULL, 0,
                                     AV_OPT_SEARCH_CHILDREN | AV_OPT_SEARCH_FAKE_OBJ))) {
-        av_dict_set(&swr_opts, opt, arg, FLAGS);
+        av_dict_set(&fftools_ctx->swr_opts, opt, arg, FLAGS);
         consumed = 1;
     }
 #endif
@@ -704,15 +698,15 @@ static int finish_group(OptionParseContext *octx, int group_idx,
     *g             = octx->cur_group;
     g->arg         = arg;
     g->group_def   = l->group_def;
-    g->sws_dict    = sws_dict;
-    g->swr_opts    = swr_opts;
-    g->codec_opts  = codec_opts;
-    g->format_opts = format_opts;
+    g->sws_dict    = fftools_ctx->sws_dict;
+    g->swr_opts    = fftools_ctx->swr_opts;
+    g->codec_opts  = fftools_ctx->codec_opts;
+    g->format_opts = fftools_ctx->format_opts;
 
-    codec_opts  = NULL;
-    format_opts = NULL;
-    sws_dict    = NULL;
-    swr_opts    = NULL;
+    fftools_ctx->codec_opts  = NULL;
+    fftools_ctx->format_opts = NULL;
+    fftools_ctx->sws_dict    = NULL;
+    fftools_ctx->swr_opts    = NULL;
 
     memset(&octx->cur_group, 0, sizeof(octx->cur_group));
 
@@ -901,7 +895,7 @@ do {                                                                           \
         return AVERROR_OPTION_NOT_FOUND;
     }
 
-    if (octx->cur_group.nb_opts || codec_opts || format_opts)
+    if (octx->cur_group.nb_opts || fftools_ctx->codec_opts || fftools_ctx->format_opts)
         av_log(NULL, AV_LOG_WARNING, "Trailing option(s) found in the "
                "command: may be ignored.\n");
 

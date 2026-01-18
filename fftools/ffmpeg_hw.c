@@ -298,16 +298,16 @@ void hw_device_free_all(void)
 AVBufferRef *hw_device_for_filter(void)
 {
     // Pick the last hardware device if the user doesn't pick the device for
-    // filters explicitly with the filter_hw_device option.
-    if (filter_hw_device)
-        return filter_hw_device->device_ref;
+    // filters explicitly with the fftools_ctx->filter_hw_device option.
+    if (fftools_ctx->filter_hw_device)
+        return fftools_ctx->filter_hw_device->device_ref;
     else if (nb_hw_devices > 0) {
         HWDevice *dev = hw_devices[nb_hw_devices - 1];
 
         if (nb_hw_devices > 1)
             av_log(NULL, AV_LOG_WARNING, "There are %d hardware devices. device "
                    "%s of type %s is picked for filters by default. Set hardware "
-                   "device explicitly with the filter_hw_device option if device "
+                   "device explicitly with the fftools_ctx->filter_hw_device option if device "
                    "%s is not usable for filters.\n",
                    nb_hw_devices, dev->name,
                    av_hwdevice_get_type_name(dev->type), dev->name);
