@@ -34,6 +34,12 @@ fn parse_extralibs(config: &Path) -> Vec<String> {
     tokens
 }
 
+fn has_config_yes(config: &Path, key: &str) -> bool {
+    let contents = fs::read_to_string(config).unwrap_or_default();
+    let needle = format!("{}=yes", key);
+    contents.lines().any(|line| line.trim() == needle)
+}
+
 fn extract_macos_minos(obj: &Path) -> Option<String> {
     let output = Command::new("otool")
         .arg("-l")
@@ -85,7 +91,7 @@ fn main() {
         }
     }
 
-    let lib_targets = [
+    let mut lib_targets = vec![
         "libavutil/libavutil.a",
         "libavcodec/libavcodec.a",
         "libavformat/libavformat.a",
@@ -93,8 +99,10 @@ fn main() {
         "libavdevice/libavdevice.a",
         "libswscale/libswscale.a",
         "libswresample/libswresample.a",
-        "libpostproc/libpostproc.a",
     ];
+    if has_config_yes(&config, "CONFIG_POSTPROC") {
+        lib_targets.push("libpostproc/libpostproc.a");
+    }
 
     let mut make = Command::new("make");
     make.arg("-C").arg(&root);
