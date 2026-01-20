@@ -31,6 +31,10 @@ path = "rustproto/tests/concurrent_ffprobe.rs"
 name = "concurrent_parity_dash"
 path = "rustproto/tests/concurrent_parity_dash.rs"
 
+[[test]]
+name = "cancel_terminates"
+path = "rustproto/tests/cancel_terminates.rs"
+
 [profile.release]
 codegen-units = 1
 lto = false
