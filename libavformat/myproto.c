@@ -31,6 +31,8 @@ static int myproto_read(URLContext *h, unsigned char *buf, int size)
     MyProtoContext *c = h->priv_data;
     if (!c || !c->rctx)
         return AVERROR(EIO);
+    if (ff_check_interrupt(&h->interrupt_callback))
+        return AVERROR_EXIT;
     return rsproto_read(c->rctx, buf, size);
 }
 
@@ -39,6 +41,8 @@ static int64_t myproto_seek(URLContext *h, int64_t pos, int whence)
     MyProtoContext *c = h->priv_data;
     if (!c || !c->rctx)
         return AVERROR(EIO);
+    if (ff_check_interrupt(&h->interrupt_callback))
+        return AVERROR_EXIT;
     return rsproto_seek(c->rctx, pos, whence);
 }
 

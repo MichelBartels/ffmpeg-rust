@@ -17,6 +17,7 @@ pub trait Source: Send + Sync {
     fn is_streamed(&self) -> bool {
         false
     }
+    fn cancel(&self) {}
 }
 
 pub trait ReadSeek: Read + Seek + Send {}
@@ -65,6 +66,10 @@ impl SourceHandle {
     pub fn url(&self) -> String {
         format!("myproto://{}", self.id)
     }
+
+    pub fn cancel(&self) {
+        cancel_source(self.id);
+    }
 }
 
 impl Drop for SourceHandle {
@@ -80,6 +85,13 @@ fn register_source(source: Arc<dyn Source>) -> SourceHandle {
     reg.next_id += 1;
     reg.sources.insert(id, source);
     SourceHandle { id }
+}
+
+fn cancel_source(id: u64) {
+    let reg = REGISTRY.lock().unwrap();
+    if let Some(source) = reg.sources.get(&id) {
+        source.cancel();
+    }
 }
 
 fn parse_id(uri: &CStr) -> Option<u64> {
@@ -300,6 +312,7 @@ impl RunHandle {
     }
 
     pub fn cancel(&self) {
+        self._source.cancel();
         if let Some(ctx) = &self.ffmpeg_ctx {
             unsafe { ffmpeg_ctx_request_exit(ctx.ptr) };
         }
@@ -310,6 +323,7 @@ impl RunHandle {
 
     pub fn cancel_handle(&self) -> CancelHandle {
         CancelHandle {
+            source_id: self._source.id,
             ffmpeg_ctx: self.ffmpeg_ctx.clone(),
             ffprobe_ctx: self.ffprobe_ctx.clone(),
         }
@@ -336,12 +350,14 @@ impl Drop for RunHandle {
 
 #[derive(Clone)]
 pub struct CancelHandle {
+    source_id: u64,
     ffmpeg_ctx: Option<std::sync::Arc<FfmpegCtxState>>,
     ffprobe_ctx: Option<std::sync::Arc<FFProbeCtxState>>,
 }
 
 impl CancelHandle {
     pub fn cancel(&self) {
+        cancel_source(self.source_id);
         if let Some(ctx) = &self.ffmpeg_ctx {
             unsafe { ffmpeg_ctx_request_exit(ctx.ptr) };
         }
