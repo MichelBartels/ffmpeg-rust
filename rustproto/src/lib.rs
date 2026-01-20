@@ -313,9 +313,6 @@ impl RunHandle {
 
     pub fn cancel(&self) {
         self._source.cancel();
-        if debug_enabled() {
-            eprintln!("rsproto: cancel requested");
-        }
         if let Some(ctx) = &self.ffmpeg_ctx {
             unsafe { ffmpeg_ctx_request_exit(ctx.ptr) };
         }
@@ -360,9 +357,6 @@ pub struct CancelHandle {
 
 impl CancelHandle {
     pub fn cancel(&self) {
-        if debug_enabled() {
-            eprintln!("rsproto: cancel requested (cancel handle)");
-        }
         cancel_source(self.source_id);
         if let Some(ctx) = &self.ffmpeg_ctx {
             unsafe { ffmpeg_ctx_request_exit(ctx.ptr) };
@@ -400,10 +394,6 @@ fn prepare_run<S: Source + 'static>(
     Ok((dir, handle, replaced))
 }
 
-fn debug_enabled() -> bool {
-    std::env::var_os("RSPROTO_DEBUG").is_some()
-}
-
 /// Run ffmpeg in-process with a temporary output directory.
 ///
 /// The `args` must include `{input}` which will be replaced with a
@@ -427,9 +417,6 @@ pub fn run_ffmpeg<S: Source + 'static>(
     let ctx_arc = std::sync::Arc::new(FfmpegCtxState { ptr: ctx });
     let ctx_for_thread = std::sync::Arc::clone(&ctx_arc);
     let join = std::thread::spawn(move || {
-        if debug_enabled() {
-            eprintln!("rsproto: ffmpeg thread start");
-        }
         let mut cstrings: Vec<CString> = Vec::with_capacity(replaced.len());
         for arg in &replaced {
             cstrings.push(
@@ -446,9 +433,6 @@ pub fn run_ffmpeg<S: Source + 'static>(
         let ret = unsafe {
             ffmpeg_run_with_ctx(ctx_for_thread.ptr, argv.len() as c_int, argv.as_mut_ptr())
         };
-        if debug_enabled() {
-            eprintln!("rsproto: ffmpeg thread exit code {ret}");
-        }
         if ret == 0 {
             Ok(())
         } else {
@@ -484,9 +468,6 @@ pub fn run_ffprobe<S: Source + 'static>(
     let ctx_arc = std::sync::Arc::new(FFProbeCtxState { ptr: ctx });
     let ctx_for_thread = std::sync::Arc::clone(&ctx_arc);
     let join = std::thread::spawn(move || {
-        if debug_enabled() {
-            eprintln!("rsproto: ffprobe thread start");
-        }
         let mut cstrings: Vec<CString> = Vec::with_capacity(replaced.len());
         for arg in &replaced {
             cstrings.push(
@@ -509,9 +490,6 @@ pub fn run_ffprobe<S: Source + 'static>(
                 0,
             )
         };
-        if debug_enabled() {
-            eprintln!("rsproto: ffprobe thread exit code {ret}");
-        }
         if ret == 0 {
             Ok(())
         } else {
