@@ -29,6 +29,7 @@
 #include <string.h>
 #include <math.h>
 #include <stddef.h>
+#include <signal.h>
 
 #include "libavformat/avformat.h"
 #include "libavformat/version.h"
@@ -38,6 +39,7 @@
 #include "libavutil/avassert.h"
 #include "libavutil/avstring.h"
 #include "libavutil/avutil.h"
+#include "libavutil/mem.h"
 #include "libavutil/bprint.h"
 #include "libavutil/channel_layout.h"
 #include "libavutil/display.h"
@@ -189,6 +191,7 @@ typedef struct FFProbeContext {
     struct LogBuffer *log_buffer;
     int log_buffer_size;
     int log_print_prefix;
+    volatile sig_atomic_t cancel;
 } FFProbeContext;
 
 static FFProbeContext ffprobe_global_ctx;
@@ -411,6 +414,12 @@ static void ffprobe_ctx_cleanup(FFProbeContext *ctx)
         av_freep(&ctx->log_buffer);
         ctx->log_buffer_size = 0;
     }
+}
+
+static int ffprobe_interrupt_cb(void *opaque)
+{
+    FFProbeContext *ctx = opaque;
+    return ctx && ctx->cancel;
 }
 
 #define do_analyze_frames               (ffprobe_ctx->do_analyze_frames)
@@ -2547,6 +2556,8 @@ static int open_input_file(InputFile *ifile, const char *filename,
     fmt_ctx = avformat_alloc_context();
     if (!fmt_ctx)
         return AVERROR(ENOMEM);
+    fmt_ctx->interrupt_callback.callback = ffprobe_interrupt_cb;
+    fmt_ctx->interrupt_callback.opaque = ffprobe_ctx;
 
     err = set_decoders(fmt_ctx);
     if (err < 0)
@@ -3544,6 +3555,53 @@ int ffprobe_run_with_options(int argc, char **argv, int install_signal_handlers,
     ret = ffprobe_main_internal(argc, argv);
 
     ffprobe_ctx_cleanup(ffprobe_ctx);
+    ffprobe_ctx = prev_probe ? prev_probe : &ffprobe_global_ctx;
+    fftools_set_context(prev_tools);
+
+    return ret;
+}
+
+FFProbeContext *ffprobe_ctx_create(void)
+{
+    FFProbeContext *ctx = av_mallocz(sizeof(*ctx));
+    if (!ctx)
+        return NULL;
+    ffprobe_ctx_reset(ctx);
+    return ctx;
+}
+
+void ffprobe_ctx_free(FFProbeContext *ctx)
+{
+    if (!ctx)
+        return;
+    ffprobe_ctx_cleanup(ctx);
+    av_free(ctx);
+}
+
+void ffprobe_ctx_request_exit(FFProbeContext *ctx)
+{
+    if (!ctx)
+        return;
+    ctx->cancel = 1;
+}
+
+int ffprobe_run_with_ctx(FFProbeContext *ctx, int argc, char **argv,
+                         int install_signal_handlers, int stdin_interaction)
+{
+    FftoolsContext tools_ctx = *fftools_default_context();
+    FftoolsContext *prev_tools;
+    FFProbeContext *prev_probe = ffprobe_ctx;
+    int ret;
+
+    tools_ctx.install_signal_handlers = install_signal_handlers;
+    tools_ctx.stdin_interaction = stdin_interaction;
+    prev_tools = fftools_set_context(&tools_ctx);
+
+    ffprobe_ctx = ctx;
+    ffprobe_ctx_reset(ffprobe_ctx);
+
+    ret = ffprobe_main_internal(argc, argv);
+
     ffprobe_ctx = prev_probe ? prev_probe : &ffprobe_global_ctx;
     fftools_set_context(prev_tools);
 

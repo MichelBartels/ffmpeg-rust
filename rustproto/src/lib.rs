@@ -207,14 +207,42 @@ pub extern "C" fn rsproto_version() -> c_int {
     1
 }
 
+#[repr(C)]
+struct FftoolsContext {
+    _private: [u8; 0],
+}
+
+#[repr(C)]
+struct FFProbeContext {
+    _private: [u8; 0],
+}
+
+#[repr(transparent)]
+#[derive(Copy, Clone)]
+struct FftoolsCtxPtr(*mut FftoolsContext);
+unsafe impl Send for FftoolsCtxPtr {}
+unsafe impl Sync for FftoolsCtxPtr {}
+
+#[repr(transparent)]
+#[derive(Copy, Clone)]
+struct FFProbeCtxPtr(*mut FFProbeContext);
+unsafe impl Send for FFProbeCtxPtr {}
+unsafe impl Sync for FFProbeCtxPtr {}
+
 extern "C" {
-    fn ffmpeg_run_with_options(
-        argc: c_int,
-        argv: *mut *mut c_char,
-        install_signal_handlers: c_int,
-        stdin_interaction: c_int,
-    ) -> c_int;
-    fn ffprobe_run_with_options(
+
+    fn ffmpeg_ctx_create(install_signal_handlers: c_int, stdin_interaction: c_int)
+        -> *mut FftoolsContext;
+    fn ffmpeg_ctx_free(ctx: *mut FftoolsContext);
+    fn ffmpeg_ctx_request_exit(ctx: *mut FftoolsContext);
+    fn ffmpeg_run_with_ctx(ctx: *mut FftoolsContext, argc: c_int, argv: *mut *mut c_char)
+        -> c_int;
+
+    fn ffprobe_ctx_create() -> *mut FFProbeContext;
+    fn ffprobe_ctx_free(ctx: *mut FFProbeContext);
+    fn ffprobe_ctx_request_exit(ctx: *mut FFProbeContext);
+    fn ffprobe_run_with_ctx(
+        ctx: *mut FFProbeContext,
         argc: c_int,
         argv: *mut *mut c_char,
         install_signal_handlers: c_int,
@@ -224,12 +252,15 @@ extern "C" {
 
 /// Handle for an in-process ffmpeg/ffprobe run.
 ///
-/// Dropping this handle will block until the underlying run completes so the
-/// source and temp directory stay valid for the duration of the run.
+/// Dropping this handle will request cancellation (ffmpeg only) and block
+/// until the underlying run completes so the source and temp directory stay
+/// valid for the duration of the run.
 pub struct RunHandle {
     tempdir: Option<tempfile::TempDir>,
     join: Option<std::thread::JoinHandle<Result<(), String>>>,
     _source: SourceHandle,
+    ffmpeg_ctx: Option<FftoolsCtxPtr>,
+    ffprobe_ctx: Option<FFProbeCtxPtr>,
 }
 
 impl RunHandle {
@@ -247,16 +278,45 @@ impl RunHandle {
                 Err(_) => return Err("ffmpeg_run thread panicked".to_string()),
             }
         }
+        if let Some(ctx) = self.ffmpeg_ctx.take() {
+            unsafe { ffmpeg_ctx_free(ctx.0) };
+        }
+        if let Some(ctx) = self.ffprobe_ctx.take() {
+            unsafe { ffprobe_ctx_free(ctx.0) };
+        }
         self.tempdir
             .take()
             .ok_or_else(|| "ffmpeg_run tempdir already taken".to_string())
+    }
+
+    pub fn cancel(&self) {
+        if let Some(ctx) = self.ffmpeg_ctx {
+            unsafe { ffmpeg_ctx_request_exit(ctx.0) };
+        }
+        if let Some(ctx) = self.ffprobe_ctx {
+            unsafe { ffprobe_ctx_request_exit(ctx.0) };
+        }
+    }
+
+    #[cfg(feature = "tokio")]
+    pub async fn wait_async(self) -> Result<tempfile::TempDir, String> {
+        tokio::task::spawn_blocking(move || self.wait())
+            .await
+            .map_err(|_| "ffmpeg_run async join failed".to_string())?
     }
 }
 
 impl Drop for RunHandle {
     fn drop(&mut self) {
+        self.cancel();
         if let Some(join) = self.join.take() {
             let _ = join.join();
+        }
+        if let Some(ctx) = self.ffmpeg_ctx.take() {
+            unsafe { ffmpeg_ctx_free(ctx.0) };
+        }
+        if let Some(ctx) = self.ffprobe_ctx.take() {
+            unsafe { ffprobe_ctx_free(ctx.0) };
         }
     }
 }
@@ -304,6 +364,12 @@ pub fn run_ffmpeg<S: Source + 'static>(
     args: &[String],
 ) -> Result<RunHandle, String> {
     let (dir, handle, replaced) = prepare_run(source, args)?;
+    let ctx = unsafe { ffmpeg_ctx_create(0, 0) };
+    if ctx.is_null() {
+        return Err("ffmpeg_ctx_create failed".to_string());
+    }
+    let ctx_ptr = FftoolsCtxPtr(ctx);
+    let ctx_val = ctx as usize;
     let join = std::thread::spawn(move || {
         let mut cstrings: Vec<CString> = Vec::with_capacity(replaced.len());
         for arg in &replaced {
@@ -318,7 +384,8 @@ pub fn run_ffmpeg<S: Source + 'static>(
             .map(|s| s.as_ptr() as *mut c_char)
             .collect();
 
-        let ret = unsafe { ffmpeg_run_with_options(argv.len() as c_int, argv.as_mut_ptr(), 0, 0) };
+        let ctx = ctx_val as *mut FftoolsContext;
+        let ret = unsafe { ffmpeg_run_with_ctx(ctx, argv.len() as c_int, argv.as_mut_ptr()) };
         if ret == 0 {
             Ok(())
         } else {
@@ -330,6 +397,8 @@ pub fn run_ffmpeg<S: Source + 'static>(
         tempdir: Some(dir),
         join: Some(join),
         _source: handle,
+        ffmpeg_ctx: Some(ctx_ptr),
+        ffprobe_ctx: None,
     })
 }
 
@@ -345,6 +414,12 @@ pub fn run_ffprobe<S: Source + 'static>(
     args: &[String],
 ) -> Result<RunHandle, String> {
     let (dir, handle, replaced) = prepare_run(source, args)?;
+    let ctx = unsafe { ffprobe_ctx_create() };
+    if ctx.is_null() {
+        return Err("ffprobe_ctx_create failed".to_string());
+    }
+    let ctx_ptr = FFProbeCtxPtr(ctx);
+    let ctx_val = ctx as usize;
     let join = std::thread::spawn(move || {
         let mut cstrings: Vec<CString> = Vec::with_capacity(replaced.len());
         for arg in &replaced {
@@ -359,7 +434,9 @@ pub fn run_ffprobe<S: Source + 'static>(
             .map(|s| s.as_ptr() as *mut c_char)
             .collect();
 
-        let ret = unsafe { ffprobe_run_with_options(argv.len() as c_int, argv.as_mut_ptr(), 0, 0) };
+        let ctx = ctx_val as *mut FFProbeContext;
+        let ret =
+            unsafe { ffprobe_run_with_ctx(ctx, argv.len() as c_int, argv.as_mut_ptr(), 0, 0) };
         if ret == 0 {
             Ok(())
         } else {
@@ -371,5 +448,7 @@ pub fn run_ffprobe<S: Source + 'static>(
         tempdir: Some(dir),
         join: Some(join),
         _source: handle,
+        ffmpeg_ctx: None,
+        ffprobe_ctx: Some(ctx_ptr),
     })
 }

@@ -1,8 +1,25 @@
 cargo:rerun-if-env-changed=FFMPEG_ROOT
+cargo:rerun-if-env-changed=FFMPEG_CONFIGURE_ARGS
 cargo:rerun-if-changed=rustproto/build.rs
 cargo:rerun-if-changed=/Users/michelbartels/Documents.nosync/personal-projects/backend-torrent/ffmpeg/ffbuild/config.mak
+CC	libavutil/version.o
+AR	libavutil/libavutil.a
+CC	libavcodec/version.o
+AR	libavcodec/libavcodec.a
+CC	libavformat/version.o
+AR	libavformat/libavformat.a
+CC	libavfilter/version.o
+AR	libavfilter/libavfilter.a
+CC	libavdevice/version.o
+AR	libavdevice/libavdevice.a
+CC	libswscale/version.o
+AR	libswscale/libswscale.a
+CC	libswresample/version.o
+AR	libswresample/libswresample.a
+CC	fftools/ffprobe_nomain.o
 CC	fftools/cmdutils.o
 CC	fftools/opt_common.o
+CC	fftools/ffmpeg_run_api.o
 AR	fftools/libffmpeg_runner.a
 cargo:rustc-link-search=native=/Users/michelbartels/Documents.nosync/personal-projects/backend-torrent/ffmpeg/fftools
 cargo:rustc-link-lib=static=ffmpeg_runner
