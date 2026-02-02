@@ -1,4 +1,5 @@
 use once_cell::sync::Lazy;
+use serde::Deserialize;
 use std::collections::HashMap;
 use std::ffi::{CStr, CString};
 use std::fs::File;
@@ -255,6 +256,32 @@ impl Drop for FFProbeCtxState {
     }
 }
 
+struct CaptureBuffer {
+    buf: Mutex<Vec<u8>>,
+}
+
+impl CaptureBuffer {
+    fn new() -> Self {
+        Self {
+            buf: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn into_inner(self) -> Vec<u8> {
+        match self.buf.into_inner() {
+            Ok(v) => v,
+            Err(e) => e.into_inner(),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct FfprobeOutput {
+    pub tempdir: tempfile::TempDir,
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+}
+
 extern "C" {
 
     fn ffmpeg_ctx_create(install_signal_handlers: c_int, stdin_interaction: c_int)
@@ -267,6 +294,13 @@ extern "C" {
     fn ffprobe_ctx_create() -> *mut FFProbeContext;
     fn ffprobe_ctx_free(ctx: *mut FFProbeContext);
     fn ffprobe_ctx_request_exit(ctx: *mut FFProbeContext);
+    fn ffprobe_ctx_set_output(
+        ctx: *mut FFProbeContext,
+        out_cb: Option<extern "C" fn(*mut c_void, *const u8, c_int) -> c_int>,
+        out_opaque: *mut c_void,
+        err_cb: Option<extern "C" fn(*mut c_void, *const u8, c_int) -> c_int>,
+        err_opaque: *mut c_void,
+    );
     fn ffprobe_run_with_ctx(
         ctx: *mut FFProbeContext,
         argc: c_int,
@@ -284,6 +318,8 @@ extern "C" {
 pub struct RunHandle {
     tempdir: Option<tempfile::TempDir>,
     join: Option<std::thread::JoinHandle<Result<(), String>>>,
+    ffprobe_stdout: Option<Box<CaptureBuffer>>,
+    ffprobe_stderr: Option<Box<CaptureBuffer>>,
     _source: SourceHandle,
     ffmpeg_ctx: Option<std::sync::Arc<FfmpegCtxState>>,
     ffprobe_ctx: Option<std::sync::Arc<FFProbeCtxState>>,
@@ -297,18 +333,39 @@ impl RunHandle {
             .path()
     }
 
-    pub fn wait(mut self) -> Result<tempfile::TempDir, String> {
+    pub fn wait(self) -> Result<tempfile::TempDir, String> {
+        let output = self.wait_with_output()?;
+        Ok(output.tempdir)
+    }
+
+    pub fn wait_with_output(mut self) -> Result<FfprobeOutput, String> {
         if let Some(join) = self.join.take() {
             match join.join() {
                 Ok(res) => res?,
                 Err(_) => return Err("ffmpeg_run thread panicked".to_string()),
             }
         }
+        let stdout = self
+            .ffprobe_stdout
+            .take()
+            .map(|b| b.into_inner())
+            .unwrap_or_default();
+        let stderr = self
+            .ffprobe_stderr
+            .take()
+            .map(|b| b.into_inner())
+            .unwrap_or_default();
         let _ = self.ffmpeg_ctx.take();
         let _ = self.ffprobe_ctx.take();
-        self.tempdir
+        let dir = self
+            .tempdir
             .take()
-            .ok_or_else(|| "ffmpeg_run tempdir already taken".to_string())
+            .ok_or_else(|| "ffmpeg_run tempdir already taken".to_string())?;
+        Ok(FfprobeOutput {
+            tempdir: dir,
+            stdout,
+            stderr,
+        })
     }
 
     pub fn cancel(&self) {
@@ -343,9 +400,197 @@ impl Drop for RunHandle {
         if let Some(join) = self.join.take() {
             let _ = join.join();
         }
+        let _ = self.ffprobe_stdout.take();
+        let _ = self.ffprobe_stderr.take();
         let _ = self.ffmpeg_ctx.take();
         let _ = self.ffprobe_ctx.take();
     }
+}
+
+impl FfprobeOutput {
+    pub fn parse_json(&self) -> Result<FfprobeJson, serde_json::Error> {
+        serde_json::from_slice(&self.stdout)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Rational {
+    pub num: i64,
+    pub den: i64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct FfprobeJson {
+    pub format: Format,
+    #[serde(default)]
+    pub streams: Vec<Stream>,
+    #[serde(flatten)]
+    pub unknown: HashMap<String, serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct Format {
+    pub filename: String,
+    #[serde(deserialize_with = "deserialize_i64")]
+    pub nb_streams: i64,
+    #[serde(deserialize_with = "deserialize_i64")]
+    pub nb_programs: i64,
+    #[serde(deserialize_with = "deserialize_i64")]
+    pub nb_stream_groups: i64,
+    pub format_name: String,
+    pub format_long_name: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_f64_opt")]
+    pub start_time: Option<f64>,
+    #[serde(default, deserialize_with = "deserialize_f64_opt")]
+    pub duration: Option<f64>,
+    #[serde(default, deserialize_with = "deserialize_i64_opt")]
+    pub size: Option<i64>,
+    #[serde(default, deserialize_with = "deserialize_i64_opt")]
+    pub bit_rate: Option<i64>,
+    #[serde(default, deserialize_with = "deserialize_i64_opt")]
+    pub probe_score: Option<i64>,
+    #[serde(default)]
+    pub tags: HashMap<String, String>,
+    #[serde(flatten)]
+    pub unknown: HashMap<String, serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct Stream {
+    #[serde(deserialize_with = "deserialize_i64")]
+    pub index: i64,
+    pub codec_tag: String,
+    pub codec_tag_string: String,
+    pub codec_type: Option<String>,
+    pub codec_name: Option<String>,
+    pub codec_long_name: Option<String>,
+    pub profile: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_i64_opt")]
+    pub level: Option<i64>,
+    #[serde(deserialize_with = "deserialize_rational")]
+    pub time_base: Rational,
+    #[serde(default, deserialize_with = "deserialize_f64_opt")]
+    pub start_time: Option<f64>,
+    #[serde(default, deserialize_with = "deserialize_f64_opt")]
+    pub duration: Option<f64>,
+    #[serde(default, deserialize_with = "deserialize_i64_opt")]
+    pub bit_rate: Option<i64>,
+    #[serde(default, deserialize_with = "deserialize_i64_opt")]
+    pub width: Option<i64>,
+    #[serde(default, deserialize_with = "deserialize_i64_opt")]
+    pub height: Option<i64>,
+    pub pix_fmt: Option<String>,
+    pub sample_aspect_ratio: Option<String>,
+    pub display_aspect_ratio: Option<String>,
+    #[serde(deserialize_with = "deserialize_rational")]
+    pub avg_frame_rate: Rational,
+    #[serde(deserialize_with = "deserialize_rational")]
+    pub r_frame_rate: Rational,
+    #[serde(default, deserialize_with = "deserialize_i64_opt")]
+    pub sample_rate: Option<i64>,
+    #[serde(default, deserialize_with = "deserialize_i64_opt")]
+    pub channels: Option<i64>,
+    pub channel_layout: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_i64_opt")]
+    pub bits_per_sample: Option<i64>,
+    #[serde(default)]
+    pub disposition: HashMap<String, i64>,
+    #[serde(default)]
+    pub tags: HashMap<String, String>,
+    #[serde(flatten)]
+    pub unknown: HashMap<String, serde_json::Value>,
+}
+
+fn deserialize_i64<'de, D>(deserializer: D) -> Result<i64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    match value {
+        serde_json::Value::Number(num) => num
+            .as_i64()
+            .or_else(|| num.as_u64().map(|v| v as i64))
+            .ok_or_else(|| serde::de::Error::custom("invalid number")),
+        serde_json::Value::String(s) => {
+            if s.eq_ignore_ascii_case("N/A") {
+                Err(serde::de::Error::custom("unexpected N/A for required field"))
+            } else {
+                s.parse::<i64>()
+                    .map_err(|_| serde::de::Error::custom("invalid integer"))
+            }
+        }
+        _ => Err(serde::de::Error::custom("invalid integer")),
+    }
+}
+
+fn deserialize_i64_opt<'de, D>(deserializer: D) -> Result<Option<i64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    match value {
+        serde_json::Value::Null => Ok(None),
+        serde_json::Value::Number(num) => Ok(num
+            .as_i64()
+            .or_else(|| num.as_u64().map(|v| v as i64))),
+        serde_json::Value::String(s) => {
+            if s.eq_ignore_ascii_case("N/A") {
+                Ok(None)
+            } else {
+                s.parse::<i64>()
+                    .map(Some)
+                    .map_err(|_| serde::de::Error::custom("invalid integer"))
+            }
+        }
+        _ => Err(serde::de::Error::custom("invalid integer")),
+    }
+}
+
+fn deserialize_f64_opt<'de, D>(deserializer: D) -> Result<Option<f64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    match value {
+        serde_json::Value::Null => Ok(None),
+        serde_json::Value::Number(num) => Ok(num.as_f64()),
+        serde_json::Value::String(s) => {
+            if s.eq_ignore_ascii_case("N/A") {
+                Ok(None)
+            } else {
+                s.parse::<f64>()
+                    .map(Some)
+                    .map_err(|_| serde::de::Error::custom("invalid float"))
+            }
+        }
+        _ => Err(serde::de::Error::custom("invalid float")),
+    }
+}
+
+fn deserialize_rational<'de, D>(deserializer: D) -> Result<Rational, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    match value {
+        serde_json::Value::String(s) => parse_rational(&s)
+            .ok_or_else(|| serde::de::Error::custom("invalid rational")),
+        serde_json::Value::Number(num) => {
+            let n = num
+                .as_i64()
+                .or_else(|| num.as_u64().map(|v| v as i64))
+                .ok_or_else(|| serde::de::Error::custom("invalid rational"))?;
+            Ok(Rational { num: n, den: 1 })
+        }
+        _ => Err(serde::de::Error::custom("invalid rational")),
+    }
+}
+
+fn parse_rational(s: &str) -> Option<Rational> {
+    let (num_str, den_str) = s.split_once('/')?;
+    let num = num_str.parse::<i64>().ok()?;
+    let den = den_str.parse::<i64>().ok()?;
+    Some(Rational { num, den })
 }
 
 #[derive(Clone)]
@@ -392,6 +637,20 @@ fn prepare_run<S: Source + 'static>(
     }
 
     Ok((dir, handle, replaced))
+}
+
+extern "C" fn capture_write(opaque: *mut c_void, buf: *const u8, len: c_int) -> c_int {
+    if opaque.is_null() || buf.is_null() || len <= 0 {
+        return 0;
+    }
+    let state = unsafe { &*(opaque as *const CaptureBuffer) };
+    let slice = unsafe { std::slice::from_raw_parts(buf, len as usize) };
+    let mut guard = match state.buf.lock() {
+        Ok(g) => g,
+        Err(e) => e.into_inner(),
+    };
+    guard.extend_from_slice(slice);
+    len
 }
 
 /// Run ffmpeg in-process with a temporary output directory.
@@ -443,19 +702,22 @@ pub fn run_ffmpeg<S: Source + 'static>(
     Ok(RunHandle {
         tempdir: Some(dir),
         join: Some(join),
+        ffprobe_stdout: None,
+        ffprobe_stderr: None,
         _source: handle,
         ffmpeg_ctx: Some(ctx_arc),
         ffprobe_ctx: None,
     })
 }
 
-/// Run ffprobe in-process with a temporary output directory.
+/// Run ffprobe in-process with a temporary output directory and captured output.
 ///
 /// The `args` must include `{input}` which will be replaced with a
 /// `myproto://<id>` URL pointing to `source`. You can also use `{outdir}` in
 /// any argument to substitute the temp directory path returned by this
 /// function. Use `RunHandle::path()` to access the output directory before
-/// the run completes, and `RunHandle::wait()` to wait for completion.
+/// the run completes, and `RunHandle::wait_with_output()` to retrieve captured
+/// stdout/stderr.
 pub fn run_ffprobe<S: Source + 'static>(
     source: S,
     args: &[String],
@@ -464,6 +726,19 @@ pub fn run_ffprobe<S: Source + 'static>(
     let ctx = unsafe { ffprobe_ctx_create() };
     if ctx.is_null() {
         return Err("ffprobe_ctx_create failed".to_string());
+    }
+    let stdout_capture = Box::new(CaptureBuffer::new());
+    let stderr_capture = Box::new(CaptureBuffer::new());
+    let stdout_ptr = stdout_capture.as_ref() as *const CaptureBuffer as *mut c_void;
+    let stderr_ptr = stderr_capture.as_ref() as *const CaptureBuffer as *mut c_void;
+    unsafe {
+        ffprobe_ctx_set_output(
+            ctx,
+            Some(capture_write),
+            stdout_ptr,
+            Some(capture_write),
+            stderr_ptr,
+        );
     }
     let ctx_arc = std::sync::Arc::new(FFProbeCtxState { ptr: ctx });
     let ctx_for_thread = std::sync::Arc::clone(&ctx_arc);
@@ -500,6 +775,8 @@ pub fn run_ffprobe<S: Source + 'static>(
     Ok(RunHandle {
         tempdir: Some(dir),
         join: Some(join),
+        ffprobe_stdout: Some(stdout_capture),
+        ffprobe_stderr: Some(stderr_capture),
         _source: handle,
         ffmpeg_ctx: None,
         ffprobe_ctx: Some(ctx_arc),

@@ -41,6 +41,7 @@ OBJS-ffmpeg +=                  \
     fftools/textformat/tf_xml.o       \
     fftools/textformat/tw_avio.o      \
     fftools/textformat/tw_buffer.o    \
+    fftools/textformat/tw_callback.o  \
     fftools/textformat/tw_stdout.o    \
     $(OBJS-resman)                    \
     $(RESOBJS)                        \
@@ -57,6 +58,7 @@ OBJS-ffprobe +=                       \
     fftools/textformat/tf_xml.o       \
     fftools/textformat/tw_avio.o      \
     fftools/textformat/tw_buffer.o    \
+    fftools/textformat/tw_callback.o  \
     fftools/textformat/tw_stdout.o    \
 
 OBJS-ffmpeg += $(COMPAT_OBJS:%=compat/%)

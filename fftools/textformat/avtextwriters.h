@@ -26,6 +26,7 @@
 #include "libavutil/bprint.h"
 
 typedef struct AVTextWriterContext AVTextWriterContext;
+typedef int (*AVTextWriterWriteCallback)(void *opaque, const uint8_t *buf, int len);
 
 typedef struct AVTextWriter {
     const AVClass *priv_class;      ///< private class of the writer, if any
@@ -58,5 +59,6 @@ int avtextwriter_create_avio(AVTextWriterContext **pwctx, AVIOContext *avio_ctx,
 int avtextwriter_create_file(AVTextWriterContext **pwctx, const char *output_filename);
 
 int avtextwriter_create_buffer(AVTextWriterContext **pwctx, AVBPrint *buffer);
+int avtextwriter_create_callback(AVTextWriterContext **pwctx, AVTextWriterWriteCallback cb, void *opaque);
 
 #endif /* FFTOOLS_TEXTFORMAT_AVTEXTWRITERS_H */

@@ -187,6 +187,11 @@ typedef struct FFProbeContext {
     int *streams_with_closed_captions;
     int *streams_with_film_grain;
 
+    ffprobe_write_cb out_write_cb;
+    void *out_opaque;
+    ffprobe_write_cb err_write_cb;
+    void *err_opaque;
+
     AVMutex log_mutex;
     struct LogBuffer *log_buffer;
     int log_buffer_size;
@@ -381,7 +386,16 @@ typedef struct LogBuffer {
 
 static void ffprobe_ctx_reset(FFProbeContext *ctx)
 {
+    ffprobe_write_cb prev_out_cb = ctx->out_write_cb;
+    void *prev_out_opaque = ctx->out_opaque;
+    ffprobe_write_cb prev_err_cb = ctx->err_write_cb;
+    void *prev_err_opaque = ctx->err_opaque;
+
     memset(ctx, 0, sizeof(*ctx));
+    ctx->out_write_cb = prev_out_cb;
+    ctx->out_opaque = prev_out_opaque;
+    ctx->err_write_cb = prev_err_cb;
+    ctx->err_opaque = prev_err_opaque;
     ctx->show_private_data = 1;
     ctx->show_optional_fields = SHOW_OPTIONAL_FIELDS_AUTO;
     ctx->find_stream_info = 1;
@@ -507,10 +521,16 @@ static void log_callback(void *ptr, int level, const char *fmt, va_list vl)
     char line[1024];
     void *new_log_buffer;
     int print_prefix = log_print_prefix;
+    int use_cb = ffprobe_ctx && ffprobe_ctx->err_write_cb != NULL;
 
     va_copy(vl2, vl);
-    av_log_default_callback(ptr, level, fmt, vl);
-    av_log_format_line(ptr, level, fmt, vl2, line, sizeof(line), &print_prefix);
+    if (use_cb) {
+        av_log_format_line(ptr, level, fmt, vl2, line, sizeof(line), &print_prefix);
+        ffprobe_ctx->err_write_cb(ffprobe_ctx->err_opaque, (const uint8_t *)line, strlen(line));
+    } else {
+        av_log_default_callback(ptr, level, fmt, vl);
+        av_log_format_line(ptr, level, fmt, vl2, line, sizeof(line), &print_prefix);
+    }
     va_end(vl2);
     log_print_prefix = print_prefix;
 
@@ -3407,7 +3427,7 @@ static int ffprobe_main_internal(int argc, char **argv)
         goto end;
     }
 
-    if (do_show_log)
+    if (do_show_log || (ffprobe_ctx && ffprobe_ctx->err_write_cb))
         av_log_set_callback(log_callback);
 
     /* mark things to show, based on -show_entries */
@@ -3470,10 +3490,17 @@ static int ffprobe_main_internal(int argc, char **argv)
         goto end;
     }
 
-    if (output_filename) {
+    if (ffprobe_ctx && ffprobe_ctx->out_write_cb) {
+        if (output_filename) {
+            av_log(NULL, AV_LOG_WARNING,
+                   "Output callbacks configured; ignoring -o output file.\n");
+        }
+        ret = avtextwriter_create_callback(&wctx, ffprobe_ctx->out_write_cb, ffprobe_ctx->out_opaque);
+    } else if (output_filename) {
         ret = avtextwriter_create_file(&wctx, output_filename);
-    } else
+    } else {
         ret = avtextwriter_create_stdout(&wctx);
+    }
 
     if (ret < 0)
         goto end;
@@ -3583,6 +3610,17 @@ void ffprobe_ctx_request_exit(FFProbeContext *ctx)
     if (!ctx)
         return;
     ctx->cancel = 1;
+}
+
+void ffprobe_ctx_set_output(FFProbeContext *ctx, ffprobe_write_cb out_cb, void *out_opaque,
+                            ffprobe_write_cb err_cb, void *err_opaque)
+{
+    if (!ctx)
+        return;
+    ctx->out_write_cb = out_cb;
+    ctx->out_opaque = out_opaque;
+    ctx->err_write_cb = err_cb;
+    ctx->err_opaque = err_opaque;
 }
 
 int ffprobe_run_with_ctx(FFProbeContext *ctx, int argc, char **argv,
