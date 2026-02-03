@@ -37,6 +37,10 @@ path = "rustproto/tests/concurrent_parity_dash.rs"
 name = "cancel_terminates"
 path = "rustproto/tests/cancel_terminates.rs"
 
+[[test]]
+name = "ffprobe_json_parse"
+path = "rustproto/tests/ffprobe_json_parse.rs"
+
 [profile.release]
 codegen-units = 1
 lto = false
