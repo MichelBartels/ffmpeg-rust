@@ -73,6 +73,22 @@ fn main() {
     let config = root.join("ffbuild").join("config.mak");
     println!("cargo:rerun-if-changed={}", config.display());
 
+    // These sources affect the in-process runner library; make sure changes get
+    // picked up without requiring a `cargo clean`.
+    for rel in [
+        "fftools/ffprobe.c",
+        "fftools/ffprobe_run_api.h",
+        "fftools/ffmpeg_run_api.c",
+        "fftools/ffmpeg_run_api.h",
+        "fftools/fftools_context.c",
+        "fftools/fftools_context.h",
+    ] {
+        let path = root.join(rel);
+        if path.exists() {
+            println!("cargo:rerun-if-changed={}", path.display());
+        }
+    }
+
     if !config.exists() {
         let args = env::var("FFMPEG_CONFIGURE_ARGS").unwrap_or_else(|_| {
             "--disable-debug --disable-doc".to_string()

@@ -41,6 +41,10 @@ path = "rustproto/tests/cancel_terminates.rs"
 name = "ffprobe_json_parse"
 path = "rustproto/tests/ffprobe_json_parse.rs"
 
+[[test]]
+name = "rsproto_inprocess_concurrency"
+path = "rustproto/tests/rsproto_inprocess_concurrency.rs"
+
 [profile.release]
 codegen-units = 1
 lto = false

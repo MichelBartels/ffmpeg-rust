@@ -516,12 +516,22 @@ static int is_key_selected_callback(AVTextFormatContext *tctx, const char *key)
 
 static void log_callback(void *ptr, int level, const char *fmt, va_list vl)
 {
-    AVClass* avc = ptr ? *(AVClass **) ptr : NULL;
     va_list vl2;
     char line[1024];
-    void *new_log_buffer;
     int print_prefix = log_print_prefix;
     int use_cb = ffprobe_ctx && ffprobe_ctx->err_write_cb != NULL;
+    int want_log_buffer = do_show_log;
+
+    /* When running ffprobe in-process alongside other ffmpeg code, this global
+     * log callback can be invoked from unrelated threads (e.g. an ffmpeg muxer
+     * thread). In those threads, ffprobe_ctx points at ffprobe_global_ctx,
+     * which may not have been initialized via ffprobe_ctx_reset(). Avoid
+     * touching any ffprobe_ctx state unless we are actually capturing logs or
+     * buffering them for -show_log. */
+    if (!use_cb && !want_log_buffer) {
+        av_log_default_callback(ptr, level, fmt, vl);
+        return;
+    }
 
     va_copy(vl2, vl);
     if (use_cb) {
@@ -534,7 +544,12 @@ static void log_callback(void *ptr, int level, const char *fmt, va_list vl)
     va_end(vl2);
     log_print_prefix = print_prefix;
 
+    if (!want_log_buffer)
+        return;
+
 #if HAVE_THREADS
+    AVClass* avc = ptr ? *(AVClass **) ptr : NULL;
+    void *new_log_buffer;
     ff_mutex_lock(&log_mutex);
 
     new_log_buffer = av_realloc_array(log_buffer, log_buffer_size + 1, sizeof(*log_buffer));
